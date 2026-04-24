@@ -53,11 +53,17 @@ When using GKE Gateways with inference servers like Triton, the default Gateway 
 *   **Mitigation:** You must deploy a `HealthCheckPolicy` CRD (as shown in this repository) to explicitly instruct the Gateway to probe `/v2/health/ready`.
 
 ### 6. The Endpoint Picker (EPP) Controller Requirement
-A common blocker when implementing the GKE Inference Gateway is failing validation on the `InferencePool` resource (e.g., `group networking.gke.io is not supported`). 
-According to official GKE documentation, the `extensionRef` (or `endpointPickerRef`) inside the `InferencePool` cannot be pointed to arbitrary services or multi-cluster imports (as multi-cluster Inference Gateways are not yet supported). 
-*   **Mitigation:** To achieve dynamic cross-pool spillover, you must deploy the **Endpoint Picker (EPP) Controller** (typically provided via Google's official Helm chart) into your cluster. The `InferencePool` must explicitly reference this EPP service. Without the EPP calculating the queue-depth scores, the Gateway falls back to standard HTTP routing, rendering advanced AI-aware routing inactive.
+To achieve dynamic cross-pool spillover, the GKE Inference Gateway requires an active **Endpoint Picker (EPP)** logic. 
+*   In a single-cluster setup, this is typically provided via a Helm-based controller that the `InferencePool` must reference.
+*   In the newly available **Multi-cluster GKE Inference Gateway (Preview)**, this logic is managed globally by the Google Cloud Load Balancer via the `networking.gke.io` API group.
+
+### 7. Fleet Membership and API Groups
+During implementation, we identified a strict boundary between API groups:
+*   **`inference.networking.k8s.io`**: Used for local pool management within a single cluster.
+*   **`networking.gke.io`**: Used for multi-cluster extensions (like `GCPInferencePoolImport`). 
+The error `group networking.gke.io is not supported` occurs if these multi-cluster resources are used in a cluster that is not registered as a **Config Cluster** within a Google Cloud Fleet. For production-grade AI-aware routing across heterogeneous hardware, registering the cluster to a Fleet and enabling Multi-cluster Gateway features is the recommended (Preview) path.
 
 ---
 
 ## Conclusion
-For production RecML environments restricted to a single region, decoupling GPU families into isolated `InferencePools` with independent HPAs is the safest, most performant way to utilize the GKE Inference Gateway. It trades slightly higher baseline costs and configuration complexity for rock-solid predictability and built-in resilience against physical GCP hardware stockouts.
+For production RecML environments restricted to a single region, decoupling GPU families into isolated `InferencePools` with independent HPAs is the safest, most performant way to utilize the GKE Inference Gateway. While single-cluster setups are possible, the most advanced AI-aware routing features (global metric-based balancing) are currently being delivered through the **Multi-cluster GKE Inference Gateway** Preview, which utilizes Fleet-based management to unify disparate GPU pools.
