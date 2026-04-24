@@ -52,6 +52,11 @@ The number of Kubernetes manifests multiplies. For every new hardware family you
 When using GKE Gateways with inference servers like Triton, the default Gateway health check pings the root path (`/`). Because Triton returns a `404 Not Found` on `/`, the Load Balancer will mark the backends as broken, resulting in continuous `503 Service Unavailable` errors at the Gateway IP.
 *   **Mitigation:** You must deploy a `HealthCheckPolicy` CRD (as shown in this repository) to explicitly instruct the Gateway to probe `/v2/health/ready`.
 
+### 6. The Endpoint Picker (EPP) Controller Requirement
+A common blocker when implementing the GKE Inference Gateway is failing validation on the `InferencePool` resource (e.g., `group networking.gke.io is not supported`). 
+According to official GKE documentation, the `extensionRef` (or `endpointPickerRef`) inside the `InferencePool` cannot be pointed to arbitrary services or multi-cluster imports (as multi-cluster Inference Gateways are not yet supported). 
+*   **Mitigation:** To achieve dynamic cross-pool spillover, you must deploy the **Endpoint Picker (EPP) Controller** (typically provided via Google's official Helm chart) into your cluster. The `InferencePool` must explicitly reference this EPP service. Without the EPP calculating the queue-depth scores, the Gateway falls back to standard HTTP routing, rendering advanced AI-aware routing inactive.
+
 ---
 
 ## Conclusion
