@@ -13,11 +13,13 @@ Instead of using a single deployment with a "fallback" ComputeClass (which mixes
 
 ## Pros of the Decoupled Multi-GPU Architecture
 
-### 1. True GPU "Obtainability" Without Performance Chaos
-By explicitly splitting L4 and G4 workloads, we solve the single-region capacity problem safely. If G4 instances stock out in `us-central1`, the G4 deployment simply stops scaling. The GKE Gateway will detect rising queues/latency on the G4 pool and dynamically shift overflow traffic to the L4 pool (which can still scale). This gives you the resilience of fallback *without* mixing hardware types in a single autoscaling group.
+### 1. Safe Hardware Isolation
+By explicitly splitting L4 and G4 workloads, we solve the single-region capacity problem safely. If G4 instances stock out in `us-central1`, the G4 deployment simply stops scaling without polluting its pool with incorrect fallback hardware. This preserves the homogeneity required for accurate AI-aware load balancing *within* the pool.
 
-### 2. Accurate AI-Aware Routing
-The GKE Inference Gateway relies on metrics like KV cache utilization or queue depth to make smart routing decisions. These mathematical models assume homogeneous backend capacity. By isolating L4 and G4 into separate `InferencePools`, the Gateway's algorithms remain accurate, preventing Out-Of-Memory (OOM) crashes and latency spikes that occur when a Gateway accidentally sends a heavy request to a weak GPU.
+### 2. A/B Testing vs. Dynamic Spillover Routing
+When using multiple `InferencePools`, the Gateway's behavior depends entirely on how you configure the `HTTPRoute`:
+*   **Static Weighted Routing (Our Setup):** By explicitly setting `weight: 50` for L4 and `weight: 50` for G4, the Gateway performs strict partitioning. **Warning:** If G4 capacity stocks out and queues rise, the Gateway will *not* dynamically shift traffic to L4. It will blindly continue sending 50% of traffic to the overwhelmed G4 pool. This is excellent for A/B testing or partitioned billing, but poor for handling stockouts.
+*   **Dynamic Overflow / Least-Request Routing:** To achieve true "spillover" (where the Gateway detects G4 is full and automatically routes to L4), you must avoid static weights. This requires advanced Gateway API configurations (such as global `least_request` load balancing policies or `InferenceObjectives` that define primary/fallback SLAs) so the Gateway evaluates queue depth *across* all pools globally, rather than just within a specific pool.
 
 ### 3. Graceful Degradation during Hardware Stockouts
 During our testing, we explicitly encountered `RESOURCE_POOL_EXHAUSTED` (Stockout) for the G4 (`nvidia-rtx-pro-6000`) hardware. Because the HPAs are independent, the L4 HPA successfully provisioned new nodes and handled the load, while the G4 HPA safely queued pending pods without crashing the primary service. 
