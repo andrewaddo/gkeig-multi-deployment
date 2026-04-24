@@ -42,9 +42,10 @@ kubectl apply -f manifests/inference-pools/triton-g4.yaml
 kubectl apply -f manifests/inference-pools/triton-services.yaml
 
 echo "===================================================="
-echo "4. Deploying Internal Gateway and HTTPRoute"
+echo "4. Deploying Internal Gateway, HTTPRoute, and HealthCheck"
 echo "===================================================="
-# Creates gke-l7-rilb Gateway and splits traffic 50/50 between L4 and G4
+# Creates gke-l7-rilb Gateway, HealthCheck overrides, and splits traffic
+kubectl apply -f manifests/inference-gateway/healthcheck-policy.yaml
 kubectl apply -f manifests/inference-gateway/triton-gateway-resource.yaml
 kubectl apply -f manifests/inference-gateway/triton-gateway.yaml
 

@@ -48,8 +48,9 @@ The number of Kubernetes manifests multiplies. For every new hardware family you
 *   `HorizontalPodAutoscaler`
 *   `PodMonitoring` (for custom metrics)
 
-### 4. Metric Propagation Delays
-While the GKE Gateway reacts to internal inference metrics in real-time, the HPA scaling path (Triton -> Managed Prometheus -> Cloud Monitoring -> Custom Metrics Adapter -> HPA) introduces a 1 to 3-minute delay. In highly bursty RecML environments, you may need to over-provision slightly to absorb the load while the HPA pipeline catches up.
+### 5. Health Check Failures (503 Errors)
+When using GKE Gateways with inference servers like Triton, the default Gateway health check pings the root path (`/`). Because Triton returns a `404 Not Found` on `/`, the Load Balancer will mark the backends as broken, resulting in continuous `503 Service Unavailable` errors at the Gateway IP.
+*   **Mitigation:** You must deploy a `HealthCheckPolicy` CRD (as shown in this repository) to explicitly instruct the Gateway to probe `/v2/health/ready`.
 
 ---
 
