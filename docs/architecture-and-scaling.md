@@ -36,7 +36,22 @@ The most efficient way to scale an inference server is based on the **User Exper
 *   **Reason:** If Triton has 10 requests sitting in the queue, latency is increasing. It doesn't matter if the GPU is at 50% or 100% utilization; the system needs more replicas to clear the backlog.
 *   **Setup:** Uses GKE Managed Prometheus (`PodMonitoring`) to scrape the metric and the Custom Metrics adapter to expose it to the HPA. This triggers scale-up *before* hardware saturation causes critical latency spikes.
 
-## 3. GKE Inference Gateway Architecture
+## 3. Dynamic Spillover Logic (Cross-Pool Routing)
+
+A key advantage of using the GKE Inference Gateway over standard Kubernetes networking is its ability to perform **Dynamic Spillover Routing** across different hardware pools (e.g., from G4 to L4) based on real-time AI metrics, rather than static percentages.
+
+### How Spillover Works
+When the Gateway is configured without strict static weights, it uses an intelligent **Endpoint Picker** to distribute requests:
+1.  **Continuous Metric Scoping:** The Gateway constantly monitors real-time telemetry (such as `nv_inference_pending_request_count` or KV Cache utilization) exported by every individual pod across all configured `InferencePools`.
+2.  **Dynamic Scoring:** As a preferred pool (like the high-bandwidth G4 pool) reaches saturation—perhaps because it cannot scale further due to a GCP stockout—its internal queue depth rises. The Gateway detects this and automatically **lowers the routing score** for those saturated pods.
+3.  **Automatic Traffic Steering:** The Gateway's Envoy proxies will begin steering new incoming requests to the pods with the best health scores. Even if traffic was naturally gravitating to the G4 pool, the Gateway will dynamically shift the distribution (e.g., routing 80% of new requests to the L4 pool) to ensure latency remains low.
+
+### Requirements for Spillover
+To achieve this, you must avoid static `weight: 50` configurations in your `HTTPRoute`. Instead, you rely on:
+*   **`InferenceObjectives`** to define SLA priorities.
+*   **`GCPBackendPolicy`** set to `CUSTOM_METRICS` (or native `InferencePool` endpoint picking) so the Gateway evaluates capacity globally across all backends.
+
+## 4. GKE Inference Gateway Architecture
 
 The GKE Inference Gateway extends the Kubernetes Gateway API to make it "AI-aware." It sits between the user and your heterogeneous GPU pools, making routing decisions based on model health rather than just network health.
 
@@ -76,7 +91,7 @@ graph TD
 | **InferencePool** | A logical grouping of model server Pods. Unlike a standard Service, an `InferencePool` allows the Gateway to see **Inference-specific health** (e.g., is the model loaded? is the KV cache full?). It enforces homogeneity: all pods in one pool should have the same GPU type. |
 | **InferenceObjective** | The service-level policy. It maps specific traffic (via headers like `x-gateway-inference-objective`) to performance targets. It allows you to prioritize "Premium" user requests over "Batch" requests when GPU resources are scarce. |
 
-## 4. Verification & Troubleshooting Commands
+## 5. Verification & Troubleshooting Commands
 
 ### Hardware Verification
 To verify that your pod is actually utilizing the specific GPU family defined in your `ComputeClass`:
