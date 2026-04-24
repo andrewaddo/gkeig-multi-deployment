@@ -85,4 +85,27 @@ During the load test, you should observe the following lifecycle:
     *   **Stockout Handling (G4):** High-end GPUs like the RTX 6000 Ada (G4) often face physical capacity constraints in specific GCP zones. You may see the new G4 pods remain in a `Pending` state. If you inspect the system events (`kubectl get events -n kube-system`), you will see:
         > `Failed adding 2 nodes... due to OutOfResource.RESOURCE_POOL_EXHAUSTED... (state:STOCKOUT, resource type:compute)`
     *   **Why this is good:** Because we used strict `ComputeClasses` with `whenUnsatisfiable: DoNotScaleUp`, the system correctly queues the pods rather than silently falling back to inferior hardware, preserving the homogeneity required for the Gateway's routing logic.
-3.  **Scale Down (Cool Down):** Once the `perf_analyzer` test concludes, the load drops to 0. After the configured stabilization window, the HPA will scale the deployments back down to 1 replica. GKE will then detect the empty GPU nodes and automatically delete them to eliminate idle costs.
+### 5. Final Scaling Test Results (Summary)
+
+On April 24, 2026, we performed a simultaneous high-concurrency scaling test for both L4 and G4 deployments on the GKE Standard cluster.
+
+- **L4 Scaling Results (Success):**
+    - The L4 deployment scaled from 1 to 3 replicas.
+    - GKE Node Auto-Provisioning (NAP) successfully provisioned two additional `g2-standard-4` (NVIDIA L4) nodes in `us-central1-b`.
+    - Total L4 capacity reached: 3 nodes.
+
+- **G4 Scaling Results (Stockout):**
+    - The G4 deployment attempted to scale from 1 to 3 replicas.
+    - The GKE cluster autoscaler requested two additional `g4-standard-48` (NVIDIA RTX 6000 Ada) nodes.
+    - **Result:** GCP returned `RESOURCE_POOL_EXHAUSTED` (STOCKOUT) in both `us-central1-b` and `us-central1-f`.
+    - **Verification:** System events correctly identified the stockout: `Failed adding 2 nodes... (state:STOCKOUT, resource type:compute)`.
+
+### 6. Architectural Conclusion
+
+This project successfully demonstrated that using **Strict ComputeClasses** on a GKE Standard cluster with **Node Auto-Provisioning** is the optimal way to manage heterogeneous GPU resources in a single region. 
+
+By isolating GPU types into separate deployments and using the **GKE Inference Gateway** to route traffic, we ensured:
+1.  **Homogeneity:** Each pool remained strictly L4 or G4, preserving the routing logic's accuracy.
+2.  **Safe Fallback:** The system prioritized scaling the L4 pool when G4 hardware was physically unavailable, rather than compromising performance by mixing hardware types.
+3.  **Efficiency:** HPA and NAP worked in tandem to dynamically expand and contract the infrastructure footprint based on real-time model load.
+
