@@ -1,57 +1,55 @@
-# Detailed Analysis: Single-Region GPU Optimization with GKE Inference Gateway
+# Detailed Analysis: Multi-GPU Architecture with GKE Inference Gateway
 
-## Benefits
+This document outlines the pros, cons, and operational realities of the specific architecture implemented in this project: **Using the GKE Inference Gateway to unify multiple, independent GPU deployments (e.g., L4 and G4), each governed by its own strict `ComputeClass` and independent Horizontal Pod Autoscaler (HPA).**
 
-### 1. Improved Resource Obtainability (via ComputeClass)
-*   **Fallback Logic:** Instead of failing to scale if a specific GPU type (e.g., L4) is unavailable in a zone, the `ComputeClass` allows the Cluster Autoscaler to fall back to another type (e.g., G2) automatically.
-*   **Reservation vs. On-Demand:** Prioritize reserved instances for cost efficiency and reliability, falling back to on-demand only when necessary.
+## The Architecture at a Glance
+Instead of using a single deployment with a "fallback" ComputeClass (which mixes GPU types and breaks Inference Gateway latency predictions), we utilize a decoupled approach:
+1.  **Isolated Pools:** One deployment exclusively for L4 (`triton-torchrec-l4`), one exclusively for G4 (`triton-torchrec-g4`).
+2.  **Strict Provisioning:** `ComputeClasses` are locked with `whenUnsatisfiable: DoNotScaleUp`.
+3.  **Independent Scaling:** Each pool has its own HPA (scaling on Queue Depth / GPU utilization).
+4.  **Unified Entrypoint:** The GKE Inference Gateway routes traffic across both pools.
 
-### 2. AI-Aware Traffic Management (via Inference Gateway)
-*   **KV Cache Utilization Routing:** The gateway can route traffic to the replica with the most available KV cache, preventing hotspots and reducing tail latency.
-*   **Queue Depth Awareness:** Routes requests away from overloaded pods with long pending queues.
-*   **Model-Based Routing:** Easily route different models or LoRA adapters to specific pools while sharing a single entry point.
+---
 
-### 3. Increased Density and Efficiency
-*   **InferencePools:** Managed as logical units, allowing for easier scaling and lifecycle management compared to individual Deployments.
-*   **Multi-Deployment Routing:** Allows "sharding" models across different hardware types while presenting a unified API to the client.
+## Pros of the Decoupled Multi-GPU Architecture
 
-## Pros
+### 1. True GPU "Obtainability" Without Performance Chaos
+By explicitly splitting L4 and G4 workloads, we solve the single-region capacity problem safely. If G4 instances stock out in `us-central1`, the G4 deployment simply stops scaling. The GKE Gateway will detect rising queues/latency on the G4 pool and dynamically shift overflow traffic to the L4 pool (which can still scale). This gives you the resilience of fallback *without* mixing hardware types in a single autoscaling group.
 
-*   **Standardized API:** Built on the Kubernetes Gateway API, ensuring compatibility and reducing vendor lock-in.
-*   **Dynamic Scaling:** Works seamlessly with GKE Cluster Autoscaler and `ComputeClass`.
-*   **Reduced Latency:** Intelligent routing significantly improves performance for LLM workloads.
-*   **Single-Region Resilience:** Maximizes availability within the constraints of a single region.
+### 2. Accurate AI-Aware Routing
+The GKE Inference Gateway relies on metrics like KV cache utilization or queue depth to make smart routing decisions. These mathematical models assume homogeneous backend capacity. By isolating L4 and G4 into separate `InferencePools`, the Gateway's algorithms remain accurate, preventing Out-Of-Memory (OOM) crashes and latency spikes that occur when a Gateway accidentally sends a heavy request to a weak GPU.
 
-## Cons
+### 3. Graceful Degradation during Hardware Stockouts
+During our testing, we explicitly encountered `RESOURCE_POOL_EXHAUSTED` (Stockout) for the G4 (`nvidia-rtx-pro-6000`) hardware. Because the HPAs are independent, the L4 HPA successfully provisioned new nodes and handled the load, while the G4 HPA safely queued pending pods without crashing the primary service. 
 
-*   **Configuration Overhead:** Requires understanding of multiple new CRDs (Gateway, HTTPRoute, InferencePool, ComputeClass, InferenceObjective).
-*   **Model Performance Variability:** Falling back to a different GPU type (e.g., L4 to G2) may result in different inference speeds, which needs to be handled by the application or through SLOs.
-*   **Cold Start Latency:** Scaling up a new node type via `ComputeClass` fallback might take longer than scaling an existing type.
-*   **Metric Delay:** Real-time metrics have a slight propagation delay, which could lead to sub-optimal routing in extremely bursty scenarios.
+### 4. A/B Testing & Heterogeneous Pricing
+This architecture allows you to apply different `InferenceObjective` priorities or `HTTPRoute` weights. You can route "Premium" users to the high-bandwidth G4 pool, and "Free" tier users to the cost-effective L4 pool, scaling their respective HPAs entirely independently based on distinct user demands.
 
-## Use Case: GPU Family "Obtainability"
-For a customer using the `g4` family, they might prioritize `g4dn.xlarge` (T4) but accept `g4dn.2xlarge` if the smaller one is unavailable, or move to `g5` (A10G) if the `g4` family is exhausted in that region. `ComputeClass` makes this hierarchy explicit and automated.
+---
 
-## RecML and Triton Inference Server Findings
+## Cons & Operational Challenges of this Setup
 
-While GKE Inference Gateway is often discussed in the context of LLMs (vLLM, TGI), it is highly applicable to Recommender ML (RecML) systems like DLRM.
+### 1. The "Oscillation" Risk between Gateway and HPA
+Because routing (Gateway) and scaling (HPA) are decoupled, they can sometimes fight each other if not tuned perfectly. 
+*   **Example:** A massive traffic spike hits. The Gateway sends traffic to the G4 pool. The G4 HPA triggers a scale-up, but hits a GCP stockout. The Gateway sees G4 queues rising and shifts traffic to the L4 pool. The L4 HPA now triggers a scale-up. If the G4 capacity suddenly frees up, the G4 pods spin up, the Gateway shifts traffic *back* to G4, leaving the newly provisioned L4 nodes idle. 
+*   **Mitigation:** Requires very careful tuning of HPA stabilization windows and Gateway routing weights.
 
-### Benefits for RecML
-*   **GPU Family Optimization:** Using `ComputeClass`, we demonstrated a fallback and multi-deployment strategy across L4 and T4 GPUs. This ensures that RecML inference (which is often memory-bandwidth bound) can still run on older T4s if newer L4s are unavailable.
-*   **Multi-Deployment Routing:** The Gateway API allows splitting traffic between different hardware pools, enabling A/B testing between GPU generations or sharded embedding tables.
+### 2. Baseline Cost Inefficiencies
+Because you are maintaining independent deployments to ensure high availability across hardware families, you must run at least `minReplicas: 1` for *every* GPU type in your architecture. You are paying for a baseline L4 and a baseline G4 24/7, rather than a single unified deployment that might only cost 1x L4 during low-traffic periods.
 
-### Challenges Encountered
-*   **Configuration Complexity:** The GKE Inference Gateway CRDs (`InferencePool`) have evolving schemas across GKE versions, requiring careful matching of `extensionRef` and `targetPorts`.
-*   **Policy Constraints:** External Managed Load Balancers may be restricted by Organizational Policies in certain playground environments, necessitating a switch to Internal Load Balancers (`gke-l7-rilb`).
-*   **Inference Extensions:** GKE-specific "Endpoint Pickers" for AI-aware routing (like KV cache awareness) are currently optimized for LLM metrics. For RecML, standard Gateway API metrics (queue depth, latency) are often sufficient.
+### 3. Configuration Sprawl
+The number of Kubernetes manifests multiplies. For every new hardware family you want to support (e.g., adding an A100 pool), you must create a new:
+*   `ComputeClass`
+*   `Deployment`
+*   `Service`
+*   `InferencePool`
+*   `HorizontalPodAutoscaler`
+*   `PodMonitoring` (for custom metrics)
 
-## Implementation Status
+### 4. Metric Propagation Delays
+While the GKE Gateway reacts to internal inference metrics in real-time, the HPA scaling path (Triton -> Managed Prometheus -> Cloud Monitoring -> Custom Metrics Adapter -> HPA) introduces a 1 to 3-minute delay. In highly bursty RecML environments, you may need to over-provision slightly to absorb the load while the HPA pipeline catches up.
 
-1.  **Cluster:** GKE Autopilot in `us-central1` (Regional).
-2.  **Compute:** L4 and T4 nodes provisioned via `ComputeClass`.
-3.  **Workload:** Triton Inference Servers deployed on both L4 and G4 pools.
-4.  **Networking:** Internal Gateway (`gke-l7-rilb`) and HTTPRoute with weighted routing (50/50 split) configured.
+---
 
 ## Conclusion
-
-Combining GKE Inference Gateway with Compute Classes provides a robust, flexible, and efficient platform for GPU-intensive workloads that are restricted to a single region. It addresses the key challenges of resource obtainability and utilization while simplifying the management of complex AI-serving architectures.
+For production RecML environments restricted to a single region, decoupling GPU families into isolated `InferencePools` with independent HPAs is the safest, most performant way to utilize the GKE Inference Gateway. It trades slightly higher baseline costs and configuration complexity for rock-solid predictability and built-in resilience against physical GCP hardware stockouts.
