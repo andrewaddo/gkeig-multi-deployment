@@ -18,7 +18,7 @@ In scenarios where workloads must remain within a single region, optimizing for 
     - `g4-class`: Targets `machineFamily: g4` and `nvidia-rtx-pro-6000`.
 - **Workload:** NVIDIA Triton Inference Server running a TorchScript DLRM model (dynamically generated via `initContainer`).
 - **Networking:** GKE Gateway API (`gke-l7-rilb`) with weighted traffic splitting between L4 and G4 pools.
-- **Scaling:** HPA configured with aggressive CPU thresholds to trigger NAP provisioning.
+- **Scaling:** HPA configured with aggressive CPU thresholds to trigger NAP provisioning during testing. *(Note: See `manifests/hpa-production/` for correct real-world metrics like Queue Depth and GPU Duty Cycle).*
 
 ## Documentation
 

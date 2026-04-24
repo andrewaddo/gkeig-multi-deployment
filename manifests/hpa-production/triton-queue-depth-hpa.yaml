@@ -1,0 +1,57 @@
+# 1. PodMonitoring to scrape Triton's internal metrics
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: triton-metrics-scraper
+  namespace: default
+spec:
+  selector:
+    matchExpressions:
+    - key: app
+      operator: In
+      values: ["triton-l4", "triton-g4"]
+  endpoints:
+  - port: 8002
+    interval: 10s
+    path: /metrics
+---
+# 2. HPA scaling based on Triton's Pending Request Queue
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: triton-l4-queue-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: triton-torchrec-l4
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: nv_inference_pending_request_count
+      target:
+        type: AverageValue
+        averageValue: 2 # Scale up if more than 2 requests are waiting per pod
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: triton-g4-queue-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: triton-torchrec-g4
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: nv_inference_pending_request_count
+      target:
+        type: AverageValue
+        averageValue: 2
