@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triton-torchrec-l4
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: triton-l4
+  template:
+    metadata:
+      labels:
+        app: triton-l4
+    spec:
+      nodeSelector:
+        cloud.google.com/compute-class: l4-class
+      tolerations:
+      - key: "cloud.google.com/compute-class"
+        operator: "Equal"
+        value: "l4-class"
+        effect: "NoSchedule"
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      initContainers:
+      - name: generate-dlrm
+        image: nvcr.io/nvidia/pytorch:24.01-py3
+        command:
+        - python3
+        - -c
+        - |
+          import os
+          import torch
+          import torch.nn as nn
+          class SimpleDLRM(nn.Module):
+              def __init__(self):
+                  super().__init__()
+                  # Dense features (13) to bottom MLP
+                  self.bottom_mlp = nn.Sequential(nn.Linear(13, 512), nn.ReLU(), nn.Linear(512, 256), nn.ReLU())
+                  # Sparse features (26 categorical) to embeddings (size 10k x 64)
+                  self.embeddings = nn.ModuleList([nn.Embedding(10000, 64) for _ in range(26)])
+                  # Top MLP taking concatenated embeddings and bottom MLP output
+                  self.top_mlp = nn.Sequential(nn.Linear(256 + 26 * 64, 1024), nn.ReLU(), nn.Linear(1024, 1), nn.Sigmoid())
+              def forward(self, dense_x, sparse_x):
+                  bottom_out = self.bottom_mlp(dense_x)
+                  emb_outs = []
+                  for i, emb in enumerate(self.embeddings):
+                      emb_outs.append(emb(sparse_x[:, i]))
+                  x = torch.cat([bottom_out] + emb_outs, dim=1)
+                  return self.top_mlp(x)
+          model = SimpleDLRM()
+          # Trace the model with dummy inputs
+          dense = torch.randn(2, 13)
+          sparse = torch.randint(0, 10000, (2, 26))
+          traced = torch.jit.trace(model, (dense, sparse))
+          # Save for Triton
+          os.makedirs("/models/dlrm/1", exist_ok=True)
+          traced.save("/models/dlrm/1/model.pt")
+          # Write Triton config
+          config = """name: "dlrm"
+          platform: "pytorch_libtorch"
+          max_batch_size: 1024
+          input [
+            {
+              name: "dense_x__0"
+              data_type: TYPE_FP32
+              dims: [ 13 ]
+            },
+            {
+              name: "sparse_x__1"
+              data_type: TYPE_INT64
+              dims: [ 26 ]
+            }
+          ]
+          output [
+            {
+              name: "OUTPUT__0"
+              data_type: TYPE_FP32
+              dims: [ 1 ]
+            }
+          ]
+          instance_group [ { count: 1, kind: KIND_GPU } ]
+          """
+          with open("/models/dlrm/config.pbtxt", "w") as f:
+              f.write(config)
+        volumeMounts:
+        - name: model-repository
+          mountPath: /models
+      containers:
+      - name: triton
+        image: nvcr.io/nvidia/tritonserver:24.01-py3
+        command: ["/opt/tritonserver/bin/tritonserver"]
+        args: ["--model-repository=/models", "--log-verbose=1", "--strict-model-config=false"]
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "2Gi"
+          limits:
+            nvidia.com/gpu: 1
+        ports:
+        - containerPort: 8000
+          name: http
+        - containerPort: 8001
+          name: grpc
+        - containerPort: 8002
+          name: metrics
+        volumeMounts:
+        - name: model-repository
+          mountPath: /models
+      volumes:
+      - name: model-repository
+        emptyDir: {}

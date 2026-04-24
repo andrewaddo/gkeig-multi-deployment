@@ -1,0 +1,27 @@
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: g4-class
+spec:
+  nodePoolAutoCreation:
+    enabled: true
+  whenUnsatisfiable: DoNotScaleUp
+  priorities:
+  - machineFamily: g4
+    gpu:
+      type: nvidia-rtx-pro-6000
+      count: 1
+---
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: l4-class
+spec:
+  nodePoolAutoCreation:
+    enabled: true
+  whenUnsatisfiable: DoNotScaleUp
+  priorities:
+  - machineFamily: g2
+    gpu:
+      type: nvidia-l4
+      count: 1
