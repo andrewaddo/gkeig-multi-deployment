@@ -2,14 +2,14 @@
 
 ## 1. The Logic of Separate Deployments for GKE Inference Gateway
 
-When optimizing GPU obtainability using GKE Compute Classes (CCC), a common initial thought is to use **Hardware Fallback** (e.g., "Give me an L4, but fall back to a T4/G4 if L4 is out of stock") within a single deployment.
+When optimizing GPU obtainability using GKE Compute Classes (CCC), a common initial thought is to use **Hardware Fallback** (e.g., "Give me an L4, but fall back to a G4 if L4 is out of stock") within a single deployment.
 
 **Why this breaks GKE Inference Gateway:**
 The Inference Gateway (and the `InferencePool` resource it routes to) assumes that all Pods within a single pool have **homogeneous performance characteristics**. The Gateway uses sophisticated mathematical models based on real-time metrics (like KV cache or queue depth) to predict latency and route traffic optimally. 
 
-If an `InferencePool` contains a mix of L4s (24GB VRAM, 300GB/s bandwidth) and G4s (48GB VRAM, 960GB/s bandwidth):
+If an `InferencePool` contains a mix of L4s (24GB VRAM, 300GB/s bandwidth) and G4s (96GB GDDR7 VRAM, Blackwell architecture):
 *   **Predictability is destroyed:** The Gateway's latency predictions will be wildly inaccurate.
-*   **Out-Of-Memory (OOM) Crashes:** A request requiring 30GB of VRAM will succeed on the G4 but crash the L4. The Gateway doesn't know the physical hardware of the underlying pod, only the metrics it exports.
+*   **Out-Of-Memory (OOM) Crashes:** A request requiring 60GB of VRAM will succeed on the G4 but crash the L4. The Gateway doesn't know the physical hardware of the underlying pod, only the metrics it exports.
 
 **The Solution: Fallback via Routing, not Provisioning**
 1.  **Strict ComputeClasses:** We define `l4-class` and `g4-class` with `whenUnsatisfiable: DoNotScaleUp`. This ensures nodes are exactly what we expect.
@@ -19,6 +19,11 @@ If an `InferencePool` contains a mix of L4s (24GB VRAM, 300GB/s bandwidth) and G
 ## 2. Scaling Considerations for RecML (DLRM)
 
 Scaling inference servers (like NVIDIA Triton) running Deep Learning Recommendation Models (DLRM) requires a different approach than standard microservices. DLRMs are typically **Memory-Bandwidth Bound** due to massive embedding table lookups, rather than purely compute-bound.
+
+### Hardware Comparison (Memory Bandwidth)
+*   **An NVIDIA L4 GPU** has a memory bandwidth of **300 GB/s** (GDDR6).
+*   **An NVIDIA RTX 6000 Blackwell (G4)** has **96GB of GDDR7 VRAM** and provides significantly higher bandwidth and throughput (up to 9x G2).
+*   **An NVIDIA H100 GPU** has a memory bandwidth of **3,350 GB/s** (HBM3).
 
 ### The Bad: CPU Utilization
 Scaling on CPU (e.g., targeting 20% CPU) is highly inefficient for GPU inference.
@@ -72,7 +77,7 @@ graph TD
 
     subgraph Inference Pools
         Route -- Weight 50 --> PoolL4[InferencePool: L4-Pool <br/><i>nvidia-l4</i>]
-        Route -- Weight 50 --> PoolG4[InferencePool: G4-Pool <br/><i>nvidia-rtx-pro-6000</i>]
+        Route -- Weight 50 --> PoolG4[InferencePool: G4-Pool <br/><i>nvidia-rtx-pro-6000-blackwell</i>]
     end
 
     subgraph Physical Nodes
@@ -97,7 +102,7 @@ graph TD
 To verify that your pod is actually utilizing the specific GPU family defined in your `ComputeClass`:
 
 ```bash
-# Check the G4 (RTX 6000 Ada) Pod
+# Check the G4 (RTX 6000 Blackwell) Pod
 kubectl exec $(kubectl get pods -l app=triton-g4 -o name | head -n 1) -- nvidia-smi
 
 # Check the L4 Pod
