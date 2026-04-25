@@ -39,18 +39,37 @@ echo "===================================================="
 # Deploys Triton and uses an initContainer to generate a TorchScript DLRM model
 kubectl apply -f manifests/inference-pools/triton-l4.yaml
 kubectl apply -f manifests/inference-pools/triton-g4.yaml
-kubectl apply -f manifests/inference-pools/triton-services.yaml
 
 echo "===================================================="
-echo "4. Deploying Internal Gateway, HTTPRoute, and HealthCheck"
+echo "4. Deploying InferencePools via Helm (EPP Controller)"
 echo "===================================================="
-# Creates gke-l7-rilb Gateway, HealthCheck overrides, and splits traffic
+# Installs the official gateway-api-inference-extension chart for both pools
+helm install triton-l4-pool \
+  --dependency-update \
+  --set inferencePool.modelServers.matchLabels.app=triton-l4 \
+  --set provider.name=gke \
+  --set inferenceExtension.monitoring.prometheus.enabled=true \
+  --version v1.4.0 \
+  oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool
+
+helm install triton-g4-pool \
+  --dependency-update \
+  --set inferencePool.modelServers.matchLabels.app=triton-g4 \
+  --set provider.name=gke \
+  --set inferenceExtension.monitoring.prometheus.enabled=true \
+  --version v1.4.0 \
+  oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool
+
+echo "===================================================="
+echo "5. Deploying Internal Gateway, HTTPRoute, and HealthCheck"
+echo "===================================================="
+# Creates gke-l7-rilb Gateway, HealthCheck overrides, and routes to InferencePools
 kubectl apply -f manifests/inference-gateway/healthcheck-policy.yaml
 kubectl apply -f manifests/inference-gateway/triton-gateway-resource.yaml
 kubectl apply -f manifests/inference-gateway/triton-gateway.yaml
 
 echo "===================================================="
-echo "5. Deploying Performance Client and HPA"
+echo "6. Deploying Performance Client and HPA"
 echo "===================================================="
 kubectl apply -f manifests/hpa/triton-hpa.yaml
 kubectl run perf-client --image=nvcr.io/nvidia/tritonserver:24.01-py3-sdk -- sleep infinity

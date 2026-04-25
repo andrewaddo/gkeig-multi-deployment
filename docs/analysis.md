@@ -54,16 +54,20 @@ When using GKE Gateways with inference servers like Triton, the default Gateway 
 
 ### 6. The Endpoint Picker (EPP) Controller Requirement
 To achieve dynamic cross-pool spillover, the GKE Inference Gateway requires an active **Endpoint Picker (EPP)** logic. 
-*   In a single-cluster setup, this is typically provided via a Helm-based controller that the `InferencePool` must reference.
-*   In the newly available **Multi-cluster GKE Inference Gateway (Preview)**, this logic is managed globally by the Google Cloud Load Balancer via the `networking.gke.io` API group.
+*   **The Official Method:** You must use the official `gateway-api-inference-extension` Helm chart (`v1.4.0+`). This chart automatically deploys the `InferencePool`, the EPP deployment, and—crucially—the internal Network Endpoint Group (NEG) binding services required by the GKE Gateway controller. 
 
-### 7. Fleet Membership and API Groups
+### 7. Lessons Learned: Helm vs. Manual Manifests
+During initial implementation attempts, manual creation of `InferencePool` and `EndpointPicker` manifests resulted in `BackendNotFound` and `missing neg status` errors from the GKE Gateway Controller. 
+*   **The Gap:** Manually writing the manifests bypassed the dynamic generation of internal Kubernetes `Service` objects (e.g., `triton-l4-pool-ips-xxx`) that the Helm chart creates. The GKE Gateway Controller absolutely requires these hidden services to map the `InferencePool` to Google Cloud Backend Services. 
+*   **Resolution:** Always use the official Helm chart to deploy `InferencePools` on GKE. Do not attempt to manually recreate the extension resources.
+
+### 8. Fleet Membership and API Groups
 During implementation, we identified a strict boundary between API groups:
-*   **`inference.networking.k8s.io`**: Used for local pool management within a single cluster.
+*   **`inference.networking.x-k8s.io`**: Used for local pool management within a single cluster (via the Helm chart).
 *   **`networking.gke.io`**: Used for multi-cluster extensions (like `GCPInferencePoolImport`). 
-The error `group networking.gke.io is not supported` occurs if these multi-cluster resources are used in a cluster that is not registered as a **Config Cluster** within a Google Cloud Fleet. For production-grade AI-aware routing across heterogeneous hardware, registering the cluster to a Fleet and enabling Multi-cluster Gateway features is the recommended (Preview) path.
+The error `group networking.gke.io is not supported` occurs if these multi-cluster resources are used in a cluster that is not registered as a **Config Cluster** within a Google Cloud Fleet. For production-grade AI-aware routing across multiple clusters, registering to a Fleet and enabling Multi-cluster Gateway features is the recommended (Preview) path.
 
 ---
 
 ## Conclusion
-For production RecML environments restricted to a single region, decoupling GPU families into isolated `InferencePools` with independent HPAs is the safest, most performant way to utilize the GKE Inference Gateway. While single-cluster setups are possible, the most advanced AI-aware routing features (global metric-based balancing) are currently being delivered through the **Multi-cluster GKE Inference Gateway** Preview, which utilizes Fleet-based management to unify disparate GPU pools.
+For production RecML environments restricted to a single region, decoupling GPU families into isolated `InferencePools` (deployed via the official Helm chart) with independent HPAs is the safest, most performant way to utilize the GKE Inference Gateway. This enables the Gateway's Endpoint Picker to dynamically shift overflow traffic based on queue depth, while strict `ComputeClasses` protect against physical GCP hardware stockouts.

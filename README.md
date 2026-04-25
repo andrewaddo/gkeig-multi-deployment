@@ -17,7 +17,8 @@ In scenarios where workloads must remain within a single region, optimizing for 
     - `l4-class`: Targets `machineFamily: g2` and `nvidia-l4`.
     - `g4-class`: Targets `machineFamily: g4` and `nvidia-rtx-pro-6000`.
 - **Workload:** NVIDIA Triton Inference Server running a TorchScript DLRM model (dynamically generated via `initContainer`).
-- **Networking:** GKE Gateway API (`gke-l7-rilb`) with weighted traffic splitting between L4 and G4 pools.
+- **Inference Pools:** Deployed exclusively via the official `gateway-api-inference-extension` Helm chart (v1.4.0) to ensure proper Endpoint Picker (EPP) and NEG binding.
+- **Networking:** GKE Gateway API (`gke-l7-rilb`) with dynamic spillover routing across the L4 and G4 InferencePools.
 - **Scaling:** HPA configured with aggressive CPU thresholds to trigger NAP provisioning during testing. *(Note: See `manifests/hpa-production/` for correct real-world metrics like Queue Depth and GPU Duty Cycle).*
 
 ## Documentation
