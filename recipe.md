@@ -123,14 +123,16 @@ Open separate terminal windows to watch the cluster react to the load test in re
 # Watch the Queue Depth metric directly from the Triton Pods (Updates every 2 seconds)
 L4_POD_IP=$(kubectl get pod -l app=triton-l4 -o jsonpath='{.items[0].status.podIP}')
 G4_POD_IP=$(kubectl get pod -l app=triton-g4 -o jsonpath='{.items[0].status.podIP}')
+
 while true; do
   clear
   echo "Monitoring Triton Queue Depths..."
-  kubectl exec perf-client -- sh -c "echo 'L4 Queue:' \$(curl -s $L4_POD_IP:8002/metrics | grep 'nv_inference_pending_request_count{model=\"dlrm\",version=\"1\"}' | awk '{print \$2}')"
-  kubectl exec perf-client -- sh -c "echo 'G4 Queue:' \$(curl -s $G4_POD_IP:8002/metrics | grep 'nv_inference_pending_request_count{model=\"dlrm\",version=\"1\"}' | awk '{print \$2}')"
+  # Use double quotes for the outer shell to resolve IPs, single quotes for the internal command
+  kubectl exec perf-client -- sh -c "curl -s $L4_POD_IP:8002/metrics | grep 'nv_inference_pending_request_count{model=\"dlrm\",version=\"1\"}' | awk '{print \"L4 Queue: \" \$2}'"
+  kubectl exec perf-client -- sh -c "curl -s $G4_POD_IP:8002/metrics | grep 'nv_inference_pending_request_count{model=\"dlrm\",version=\"1\"}' | awk '{print \"G4 Queue: \" \$2}'"
   sleep 2
 done
-
+```
 # Watch the HPA scale up based on Queue Depth
 kubectl get hpa -w
 
