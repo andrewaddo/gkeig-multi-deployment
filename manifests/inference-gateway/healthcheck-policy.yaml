@@ -1,7 +1,7 @@
 apiVersion: networking.gke.io/v1
 kind: HealthCheckPolicy
 metadata:
-  name: triton-l4-healthcheck
+  name: triton-unified-healthcheck
   namespace: default
 spec:
   default:
@@ -13,21 +13,4 @@ spec:
   targetRef:
     group: ""
     kind: Service
-    name: triton-l4-svc
----
-apiVersion: networking.gke.io/v1
-kind: HealthCheckPolicy
-metadata:
-  name: triton-g4-healthcheck
-  namespace: default
-spec:
-  default:
-    config:
-      httpHealthCheck:
-        port: 8000
-        requestPath: /v2/health/ready
-      type: HTTP
-  targetRef:
-    group: ""
-    kind: Service
-    name: triton-g4-svc
+    name: triton-unified-svc

@@ -44,9 +44,10 @@ kubectl apply -f manifests/compute-classes/strict-classes.yaml
 # Deploy Triton Services
 kubectl apply -f manifests/inference-pools/triton-services.yaml
 
-# Deploy Triton Pods (L4 and G4)
+# Deploy Triton Pods (L4 and G4) and Unified Service
 kubectl apply -f manifests/inference-pools/triton-l4.yaml
 kubectl apply -f manifests/inference-pools/triton-g4.yaml
+kubectl apply -f manifests/inference-pools/triton-services.yaml
 ```
 *Wait for pods to transition from `Init` to `Running` (takes ~2 minutes to generate the model).*
 ```bash
@@ -57,7 +58,7 @@ kubectl get pods -w
 
 Deploy the Regional Gateway, HTTPRoute, HealthChecks (to fix the 503 error), and the UBB policy (to map Triton queue depth to the Load Balancer).
 
-*Note: This setup utilizes the GA **GKE Gateway API** combined with **Utilization-Based Balancing (UBB)** to achieve AI-aware dynamic spillover. While the "GKE Inference Gateway" (which uses `InferencePool` and `EndpointPicker` CRDs) is an alternative path, it is currently in Preview and was bypassed in this setup due to API compatibility bugs on this specific GKE version.*
+*Note: This setup utilizes the GA **GKE Gateway API** combined with **Utilization-Based Balancing (UBB)** against a **Unified Service** to achieve AI-aware dynamic spillover, avoiding the Preview Inference Gateway CRD bugs.*
 
 ```bash
 # 1. Gateway & Route
@@ -121,8 +122,8 @@ Open separate terminal windows to watch the cluster react to the load test in re
 
 ```bash
 # Watch the Queue Depth metric directly from the Triton Pods (Updates every 2 seconds)
-L4_POD_IP=$(kubectl get pod -l app=triton-l4 -o jsonpath='{.items[0].status.podIP}')
-G4_POD_IP=$(kubectl get pod -l app=triton-g4 -o jsonpath='{.items[0].status.podIP}')
+L4_POD_IP=$(kubectl get pod -l app=triton-l4 --field-selector=status.phase=Running -o jsonpath='{.items[0].status.podIP}')
+G4_POD_IP=$(kubectl get pod -l app=triton-g4 --field-selector=status.phase=Running -o jsonpath='{.items[0].status.podIP}')
 
 while true; do
   clear

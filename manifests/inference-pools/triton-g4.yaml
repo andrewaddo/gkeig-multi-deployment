@@ -11,6 +11,7 @@ spec:
     metadata:
       labels:
         app: triton-g4
+        app.kubernetes.io/name: triton-inference
     spec:
       nodeSelector:
         cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000

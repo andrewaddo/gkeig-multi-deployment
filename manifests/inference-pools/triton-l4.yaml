@@ -11,6 +11,7 @@ spec:
     metadata:
       labels:
         app: triton-l4
+        app.kubernetes.io/name: triton-inference
     spec:
       nodeSelector:
         cloud.google.com/compute-class: l4-class
