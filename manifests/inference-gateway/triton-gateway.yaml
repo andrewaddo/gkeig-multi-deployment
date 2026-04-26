@@ -13,3 +13,5 @@ spec:
     backendRefs:
     - name: triton-l4-svc
       port: 8000
+    - name: triton-g4-svc
+      port: 8000

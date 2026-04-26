@@ -1,0 +1,77 @@
+apiVersion: autoscaling.gke.io/v1beta1
+kind: AutoscalingMetric
+metadata:
+  name: triton-l4-queue
+  namespace: default
+spec:
+  metrics:
+  - pod:
+      selector:
+        matchLabels:
+          app: triton-l4
+      containers:
+      - endpoint:
+          port: 8002
+          path: /metrics
+        metrics:
+        - gauge:
+            name: application-utilization
+            prometheusMetricName: nv_inference_pending_request_count
+            loadBalancing:
+              enabled: true
+---
+apiVersion: autoscaling.gke.io/v1beta1
+kind: AutoscalingMetric
+metadata:
+  name: triton-g4-queue
+  namespace: default
+spec:
+  metrics:
+  - pod:
+      selector:
+        matchLabels:
+          app: triton-g4
+      containers:
+      - endpoint:
+          port: 8002
+          path: /metrics
+        metrics:
+        - gauge:
+            name: application-utilization
+            prometheusMetricName: nv_inference_pending_request_count
+            loadBalancing:
+              enabled: true
+---
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: triton-l4-policy
+  namespace: default
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: triton-l4-svc
+  default:
+    balancingMode: CUSTOM_METRICS
+    customMetrics:
+    - name: orca.application_utilization
+      dryRun: false
+      maxUtilizationPercent: 10
+---
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: triton-g4-policy
+  namespace: default
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: triton-g4-svc
+  default:
+    balancingMode: CUSTOM_METRICS
+    customMetrics:
+    - name: orca.application_utilization
+      dryRun: false
+      maxUtilizationPercent: 10

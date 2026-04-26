@@ -11,9 +11,9 @@ spec:
         requestPath: /v2/health/ready
       type: HTTP
   targetRef:
-    group: inference.networking.x-k8s.io
-    kind: InferencePool
-    name: triton-l4-pool
+    group: ""
+    kind: Service
+    name: triton-l4-svc
 ---
 apiVersion: networking.gke.io/v1
 kind: HealthCheckPolicy
@@ -28,6 +28,6 @@ spec:
         requestPath: /v2/health/ready
       type: HTTP
   targetRef:
-    group: inference.networking.x-k8s.io
-    kind: InferencePool
-    name: triton-g4-pool
+    group: ""
+    kind: Service
+    name: triton-g4-svc

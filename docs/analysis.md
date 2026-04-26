@@ -52,16 +52,13 @@ The number of Kubernetes manifests multiplies. For every new hardware family you
 When using GKE Gateways with inference servers like Triton, the default Gateway health check pings the root path (`/`). Because Triton returns a `404 Not Found` on `/`, the Load Balancer will mark the backends as broken, resulting in continuous `503 Service Unavailable` errors at the Gateway IP.
 *   **Mitigation:** You must deploy a `HealthCheckPolicy` CRD (as shown in this repository) to explicitly instruct the Gateway to probe `/v2/health/ready`.
 
-### 6. The Endpoint Picker (EPP) Controller Requirement
-To achieve dynamic cross-pool spillover, the GKE Inference Gateway requires an active **Endpoint Picker (EPP)** logic. 
-*   **The Official Method:** You must use the official `gateway-api-inference-extension` Helm chart (`v1.4.0+`). This chart automatically deploys the `InferencePool`, the EPP deployment, and—crucially—the internal Network Endpoint Group (NEG) binding services required by the GKE Gateway controller. 
+### 6. The "Gold Standard": Utilization-Based Balancing (UBB)
+While the `InferencePool` and Endpoint Picker (EPP) approach is currently in Preview and subject to controller bugs, the most robust way to achieve Dynamic Spillover in a single region is using **Utilization-Based Balancing (UBB)**.
+*   **The Mechanism:** Instead of a local EPP pod, UBB uses the `AutoscalingMetric` CRD to configure pods to send Open Request Cost Aggregation (ORCA) load reports directly to the Google Cloud Load Balancer.
+*   **The Policy:** You apply a `GCPBackendPolicy` to your standard Kubernetes Services, setting the `balancingMode` to `CUSTOM_METRICS`.
+*   **The Result:** The Regional Load Balancer natively reads the `queue_depth` metric from the Triton pods. If the G4 pods hit capacity, the Load Balancer natively and instantly sheds the overflow traffic to the L4 service, entirely bypassing the need for the experimental `InferencePool` CRDs.
 
-### 7. Lessons Learned: Helm vs. Manual Manifests
-During initial implementation attempts, manual creation of `InferencePool` and `EndpointPicker` manifests resulted in `BackendNotFound` and `missing neg status` errors from the GKE Gateway Controller. 
-*   **The Gap:** Manually writing the manifests bypassed the dynamic generation of internal Kubernetes `Service` objects (e.g., `triton-l4-pool-ips-xxx`) that the Helm chart creates. The GKE Gateway Controller absolutely requires these hidden services to map the `InferencePool` to Google Cloud Backend Services. 
-*   **Resolution:** Always use the official Helm chart to deploy `InferencePools` on GKE. Do not attempt to manually recreate the extension resources.
-
-### 8. Fleet Membership and API Groups
+### 7. Fleet Membership and API Groups
 During implementation, we identified a strict boundary between API groups:
 *   **`inference.networking.x-k8s.io`**: Used for local pool management within a single cluster (via the Helm chart).
 *   **`networking.gke.io`**: Used for multi-cluster extensions (like `GCPInferencePoolImport`). 
