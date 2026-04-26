@@ -57,6 +57,8 @@ kubectl get pods -w
 
 Deploy the Regional Gateway, HTTPRoute, HealthChecks (to fix the 503 error), and the UBB policy (to map Triton queue depth to the Load Balancer).
 
+*Note: This setup utilizes the GA **GKE Gateway API** combined with **Utilization-Based Balancing (UBB)** to achieve AI-aware dynamic spillover. While the "GKE Inference Gateway" (which uses `InferencePool` and `EndpointPicker` CRDs) is an alternative path, it is currently in Preview and was bypassed in this setup due to API compatibility bugs on this specific GKE version.*
+
 ```bash
 # 1. Gateway & Route
 kubectl apply -f manifests/inference-gateway/triton-gateway-resource.yaml
