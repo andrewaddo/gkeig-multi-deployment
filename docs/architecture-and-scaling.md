@@ -1,58 +1,30 @@
 # Architecture and Scaling Considerations
 
-## 1. The Logic of a Unified Service for GKE UBB Spillover
+## 1. The Logic of a Unified Service for Active-Active AI Routing
 
-When optimizing GPU obtainability using GKE Compute Classes (CCC), a common initial thought is to use **Hardware Fallback** (e.g., "Give me an L4, but fall back to a G4 if L4 is out of stock") within a single deployment.
-
-**Why this breaks Load Balancing Predictions:**
-If an autoscaler mixes L4s (24GB VRAM) and G4s (96GB GDDR7 VRAM) into a single ReplicaSet, it is impossible to scale them independently. 
+When managing AI inference workloads, ensuring high availability (HA) against physical hardware stockouts is paramount. Instead of relying on a single deployment that might fail to scale if a specific GCP zone runs out of GPUs, this architecture utilizes multiple isolated nodepools managed by a single intelligent Load Balancer.
 
 **The Solution: Independent Deployments, Unified Service**
-1.  **Strict ComputeClasses:** We define `l4-class` and `g4-class` with `whenUnsatisfiable: DoNotScaleUp`. This ensures nodes are exactly what we expect.
-2.  **Isolated Deployments:** We deploy `Deployment-L4` and `Deployment-G4` so their HPAs can scale them independently based on load.
-3.  **Unified Service:** Both deployments share a common label (e.g., `app.kubernetes.io/name: triton-inference`). A single Kubernetes `Service` selects this label, combining both the L4 and G4 pods into a unified backend.
-4.  **Intelligent Routing (UBB):** We apply a `GCPBackendPolicy` using **Utilization-Based Balancing (UBB)** to this unified service. The Regional Load Balancer natively reads the `queue_depth` metric from every pod. If the G4 pods hit capacity, the Load Balancer natively and instantly sheds the overflow traffic to the L4 pods within the same service, entirely bypassing the need for experimental `InferencePool` CRDs.
+1.  **Strict ComputeClasses:** We define `l4-class-primary` and `l4-class-secondary` with `whenUnsatisfiable: DoNotScaleUp`. This guarantees that each nodepool strictly provisions the exact hardware we expect (e.g., `g2-standard-4`).
+2.  **Isolated Deployments:** We deploy `Deployment-L4-Primary` and `Deployment-L4-Secondary`. Their respective HPAs scale them entirely independently based on load. If one zone suffers a stockout, its HPA simply stops scaling, while the other continues.
+3.  **Unified Service:** Both deployments share a common label (`shared-app: triton-inference`). A single Kubernetes `Service` selects this label, combining all pods across all pools into a massive unified backend.
+4.  **Intelligent Routing (UBB):** We apply a `GCPBackendPolicy` utilizing **Utilization-Based Balancing (UBB)** directly to this unified service. The Regional Load Balancer natively reads the `gke.gpu_duty_cycle` metric from every pod. It aggressively spreads incoming requests to the pods with the lowest utilization, enforcing an Active-Active distribution.
 
-## 2. Scaling Considerations for RecML (DLRM)
+## 2. Dynamic Spreading Logic (UBB)
 
-Scaling inference servers (like NVIDIA Triton) running Deep Learning Recommendation Models (DLRM) requires a different approach than standard microservices. DLRMs are typically **Memory-Bandwidth Bound** due to massive embedding table lookups, rather than purely compute-bound.
+A key advantage of using Utilization-Based Balancing (UBB) is its ability to perform **Dynamic Spreading** across different hardware pools based on real-time metrics, rather than static round-robin percentages.
 
-### Hardware Comparison (Memory Bandwidth)
-*   **An NVIDIA L4 GPU** has a memory bandwidth of **300 GB/s** (GDDR6).
-*   **An NVIDIA RTX 6000 Blackwell (G4)** has **96GB of GDDR7 VRAM** and provides significantly higher bandwidth and throughput (up to 9x G2).
-*   **An NVIDIA H100 GPU** has a memory bandwidth of **3,350 GB/s** (HBM3).
+### How Active-Active Spreading Works
+When the Load Balancer is configured with UBB targeting a `maxUtilizationPercent` of 80%:
+1.  **Continuous Metric Scoping:** The Load Balancer natively monitors the `gke.gpu_duty_cycle` of every individual pod within the unified service.
+2.  **Dynamic Scoring:** When a new request arrives, the Load Balancer routes it to the pod currently reporting the lowest GPU utilization.
+3.  **Automatic Balancing:** By constantly seeking the lowest utilization, the Load Balancer naturally forces all pods across all isolated deployments into a state of equilibrium. As overall traffic increases, the utilization of the entire global fleet rises uniformly, triggering all HPAs to scale up simultaneously.
 
-### The Bad: CPU Utilization
-Scaling on CPU (e.g., targeting 20% CPU) is highly inefficient for GPU inference.
-*   **Reason:** The CPU acts merely as a dispatcher (receiving the HTTP request, formatting the tensor, sending it to the GPU). 
-*   **Result:** The GPU can be at 100% saturation, completely blocking new requests, while the container CPU sits idle at 4%. The HPA will never trigger, and requests will time out.
-
-### The Better: GPU Duty Cycle
-Scaling on GPU metrics (e.g., `kubernetes.io|container|accelerator|duty_cycle`) accurately measures hardware saturation.
-*   **Reason:** It tracks the percentage of time the GPU CUDA cores are actively processing data.
-*   **Setup:** Requires installing the `custom-metrics-stackdriver-adapter` in GKE Standard.
-
-### The Gold Standard: Queue Depth / Pending Requests
-The most efficient way to scale an inference server is based on the **User Experience**—specifically, how many requests are waiting in line.
-*   **Metric:** `nv_inference_pending_request_count` (exported by Triton).
-*   **Reason:** If Triton has 10 requests sitting in the queue, latency is increasing. It doesn't matter if the GPU is at 50% or 100% utilization; the system needs more replicas to clear the backlog.
-*   **Setup:** Uses GKE Managed Prometheus (`PodMonitoring`) to scrape the metric and the Custom Metrics adapter to expose it to the HPA. This triggers scale-up *before* hardware saturation causes critical latency spikes.
-
-## 3. Dynamic Spillover Logic (UBB)
-
-A key advantage of using Utilization-Based Balancing (UBB) over standard Kubernetes networking is its ability to perform **Dynamic Spillover Routing** across different hardware pools (e.g., from G4 to L4) based on real-time AI metrics, rather than static percentages.
-
-### How Spillover Works
-When the Load Balancer is configured with UBB, it evaluates capacity dynamically:
-1.  **Continuous Metric Scoping:** UBB uses `AutoscalingMetric` to continuously monitor real-time telemetry (such as `nv_inference_pending_request_count`) exported by every individual pod within the unified service.
-2.  **Dynamic Scoring:** As a preferred pool (like the high-bandwidth G4 pool) reaches saturation—perhaps because it cannot scale further due to a GCP stockout—its internal queue depth rises. The Load Balancer detects this via the ORCA metric report.
-3.  **Automatic Traffic Steering:** The Google Cloud Load Balancer will begin steering new incoming requests to the pods with the lowest reported utilization scores. This dynamically shifts the distribution (e.g., routing 80% of new requests to the L4 pool) to ensure latency remains low.
-
-## 4. Architecture Diagram
+## 3. Architecture Diagram
 
 ```mermaid
 graph TD
-    User([User Request]) --> Gateway[GKE Regional Internal Load Balancer]
+    User([User Request]) --> Gateway[GKE Regional Internal L7 Load Balancer]
     
     subgraph Routing Layer
         Gateway --> Route[HTTPRoute <br/><i>Path: /</i>]
@@ -60,21 +32,33 @@ graph TD
     end
 
     subgraph Policy Layer
-        Metric[AutoscalingMetric <br/><i>orca.application_utilization</i>] -.-> Service
-        Policy[GCPBackendPolicy <br/><i>CUSTOM_METRICS</i>] -.-> Service
+        Policy[GCPBackendPolicy <br/><i>CUSTOM_METRICS: gke.gpu_duty_cycle</i>] -.-> Service
     end
 
     subgraph Isolated Deployments
-        Service --> DeployL4[Deployment: L4 <br/><i>nvidia-l4</i>]
-        Service --> DeployG4[Deployment: G4 <br/><i>nvidia-rtx-pro-6000-blackwell</i>]
+        Service --> DeployPrimary[Deployment: Primary Pool <br/><i>ComputeClass: l4-class-primary</i>]
+        Service --> DeploySecondary[Deployment: Secondary Pool <br/><i>ComputeClass: l4-class-secondary</i>]
     end
 
-    subgraph Physical Nodes
-        DeployL4 --> PodL1[Triton Pod]
-        DeployL4 --> PodL2[Triton Pod]
-        DeployG4 --> PodG1[Triton Pod]
+    subgraph Physical Nodes (NVIDIA L4)
+        DeployPrimary --> PodP1[Triton Pod]
+        DeployPrimary --> PodP2[Triton Pod]
+        DeploySecondary --> PodS1[Triton Pod]
     end
 ```
+
+## 4. Scaling Considerations for RecML (DLRM)
+
+Scaling inference servers (like NVIDIA Triton) running Deep Learning Recommendation Models (DLRM) requires careful resource allocation.
+
+### The CPU Bottleneck Reality
+While DLRMs execute matrix multiplications on the GPU, they are heavily reliant on the CPU for JSON payload parsing, HTTP connection handling, and tensor formatting.
+*   **The Problem:** If you assign only `500m` CPU to a Triton pod, a burst of parallel HTTP requests will saturate the CPU instantly. The Gateway will return `504 Gateway Timeout` errors before the GPU even has a chance to process the data.
+*   **The Solution:** Align pod resources with the physical node limits. By assigning `4 CPU` and `8Gi RAM` to the pods (matching the `g2-standard-4` node), and configuring Triton's `instance_group` to `count: 4`, the pod can easily process massive parallel bursts and feed the GPU efficiently.
+
+### Choosing the Right HPA Metric
+*   **GPU Duty Cycle:** The `gke.gpu_duty_cycle` is excellent for UBB routing because it represents the actual saturation of the CUDA cores.
+*   **CPU Utilization (Current HPA Setup):** Because DLRMs are so CPU-intensive during the HTTP/JSON phase, scaling on CPU utilization (e.g., target 70%) is incredibly fast and reliable. As traffic bursts, the CPU spikes first, triggering rapid HPA scale-ups that provision new nodes before the GPU completely locks up.
 
 ## 5. Verification & Troubleshooting Commands
 
@@ -82,20 +66,20 @@ graph TD
 To verify that your pod is actually utilizing the specific GPU family defined in your `ComputeClass`:
 
 ```bash
-# Check the G4 (RTX 6000 Blackwell) Pod
-kubectl exec $(kubectl get pods -l app=triton-g4 -o name | head -n 1) -- nvidia-smi
+# Check the Primary Pod GPU
+kubectl exec $(kubectl get pods -l app=triton-l4-primary -o name | head -n 1) -c triton -- nvidia-smi
 
-# Check the L4 Pod
-kubectl exec $(kubectl get pods -l app=triton-l4 -o name | head -n 1) -- nvidia-smi
+# Check the Secondary Pod GPU
+kubectl exec $(kubectl get pods -l app=triton-l4-secondary -o name | head -n 1) -c triton -- nvidia-smi
 ```
 
 ### Scaling Verification
-To see why a pod is stuck in `Pending` (crucial for detecting G4 stockouts):
+To see why a pod is stuck in `Pending` (crucial for detecting physical hardware stockouts):
 
 ```bash
-# View autoscaler decision logs
+# View autoscaler decision logs (Look for RESOURCE_POOL_EXHAUSTED)
 kubectl get events -n kube-system --sort-by='.lastTimestamp'
 
 # View HPA metrics calculation
-kubectl describe hpa triton-g4-hpa
+kubectl describe hpa triton-l4-primary-hpa
 ```

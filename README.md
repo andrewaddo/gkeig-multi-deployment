@@ -1,34 +1,36 @@
-# GKE Inference Gateway: Single-Region Multi-Deployment GPU Optimization
+# GKE Inference Gateway: Active-Active Multi-Pool GPU Routing
 
-This project explores using the GKE Inference Gateway and Custom Compute Classes (CCC) to optimize GPU resource utilization and availability across multiple deployments in a single region.
+This project demonstrates how to build a highly available, **Active-Active** AI inference architecture on Google Kubernetes Engine (GKE). It utilizes the GKE Gateway API and **Utilization-Based Balancing (UBB)** to seamlessly route traffic across multiple independent GPU nodepools, ensuring uniform hardware utilization and synchronized autoscaling.
 
 ## Overview
 
-In scenarios where workloads must remain within a single region, optimizing for GPU "obtainability" and "utilization" is critical. This project demonstrates how to:
+When running critical AI workloads like RecML (DLRMs) or LLMs, relying on a single nodepool or deployment can be risky during zone-specific hardware stockouts. This project solves that by demonstrating how to:
 
-1.  **Leverage Compute Classes (CCC):** Define a prioritized list of GPU types (e.g., L4, G2) to ensure the Cluster Autoscaler can provide resources even if the preferred type is unavailable.
-2.  **Use GKE Inference Gateway:** Route traffic intelligently across multiple `InferencePools` based on real-time metrics (like KV cache utilization) rather than simple round-robin.
-3.  **Consolidate Resources:** Maximize GPU utilization by sharing resources across deployments while maintaining isolation and priority.
+1.  **Isolate Hardware Pools:** Use strict `ComputeClasses` to create independent primary and secondary nodepools (both using NVIDIA L4 GPUs).
+2.  **Unify the Endpoint:** Group pods from multiple distinct deployments under a single, unified Kubernetes Service.
+3.  **Active-Active UBB Routing:** Apply a `GCPBackendPolicy` using the native `gke.gpu_duty_cycle` metric. The Google Cloud Load Balancer natively reads the GPU utilization of every pod and spreads traffic dynamically to maintain an even 80% saturation across all pools.
+4.  **Synchronized Autoscaling:** As the Load Balancer spreads traffic evenly, the independent HPAs for both pools trigger scaling operations simultaneously.
 
-## Current Architecture (GKE Standard)
+## Current Architecture
 
 - **Cluster:** GKE Standard with Node Auto-Provisioning (NAP) enabled.
 - **ComputeClasses:** 
-    - `l4-class`: Targets `machineFamily: g2` and `nvidia-l4`.
-    - `g4-class`: Targets `machineFamily: g4` and `nvidia-rtx-pro-6000`.
-- **Workload:** NVIDIA Triton Inference Server running a TorchScript DLRM model (dynamically generated via `initContainer`).
-- **Inference Pools:** Deployed exclusively via the official `gateway-api-inference-extension` Helm chart (v1.4.0) to ensure proper Endpoint Picker (EPP) and NEG binding.
-- **Networking:** GKE Gateway API (`gke-l7-rilb`) with dynamic spillover routing across the L4 and G4 InferencePools.
-- **Scaling:** HPA configured with aggressive CPU thresholds to trigger NAP provisioning during testing. *(Note: See `manifests/hpa-production/` for correct real-world metrics like Queue Depth and GPU Duty Cycle).*
+    - `l4-class-primary`: Targets `machineFamily: g2` (NVIDIA L4).
+    - `l4-class-secondary`: Targets `machineFamily: g2` (NVIDIA L4).
+- **Workload:** NVIDIA Triton Inference Server running a TorchScript DLRM model (generated dynamically via `initContainer`). Optimized with 4 CPUs, 8Gi RAM, and an internal Triton concurrency of 4 instances per GPU.
+- **Networking:** GKE Gateway API (`gke-l7-rilb`) routing to a `triton-unified-svc`.
+- **Load Balancing:** UBB configured via `GCPBackendPolicy` targeting a `maxUtilizationPercent` of 80% on the GPU duty cycle.
+- **Scaling:** HPA configured on standard CPU metrics (target 70%) for rapid, reliable scale-up during inference bursts.
 
 ## Documentation
 
-For a deep dive into the architectural reasoning (why we isolate deployments per GPU type) and scaling strategies (CPU vs GPU vs Queue Depth), please read:
-**[Architecture and Scaling Considerations](docs/architecture-and-scaling.md)**
+For a deep dive into the architectural reasoning, the trade-offs between "Spillover" vs "Active-Active", and performance optimizations, read:
+*   **[Detailed Analysis](docs/analysis.md)**
+*   **[Architecture & Scaling Considerations](docs/architecture-and-scaling.md)**
 
 ## Setup Instructions
 
-A fully automated bash script is provided to recreate this environment from scratch. It provisions a GKE Standard cluster with Node Auto-Provisioning configured for L4 and RTX-6000 (G4) GPUs.
+A fully automated bash script is provided to recreate this environment from scratch.
 
 ```bash
 chmod +x scripts/setup.sh
@@ -37,76 +39,29 @@ chmod +x scripts/setup.sh
 
 ## Verification & Testing
 
-### 1. Verify GPU Provisioning (L4 vs G4)
-Once the setup script finishes and pods are running, verify that GKE successfully provisioned distinct nodes for the L4 and G4 classes:
+To verify the Active-Active behavior, you can run a sustained load test using the deployed `perf-client` pod.
 
+### Run the Load Test
 ```bash
-kubectl get nodes -L cloud.google.com/gke-accelerator
-```
-*Sample Output:*
-```text
-NAME                                                  STATUS   ROLES    AGE   VERSION               GKE-ACCELERATOR
-gke-ducdo-gkeig-mult-nap-g2-standard--de064c0f-fk75   Ready    <none>   108m  v1.35.1-gke.1396002   nvidia-l4
-gke-ducdo-gkeig-mult-nap-g4-standard--dffd03a8-czl6   Ready    <none>   67m   v1.35.1-gke.1396002   nvidia-rtx-pro-6000
-```
+GATEWAY_IP=$(kubectl get gateway triton-gateway -o jsonpath='{.status.addresses[0].value}')
 
-### 2. Trigger the Performance Load Test
-To test the autoscaling (HPA) and the Gateway's routing, execute the NVIDIA `perf_analyzer` from the client pod. This simulates high-concurrency requests against the synthetic DLRM model.
-
-```bash
-L4_IP=$(kubectl get svc triton-l4-svc -o jsonpath='{.spec.clusterIP}')
-G4_IP=$(kubectl get svc triton-g4-svc -o jsonpath='{.spec.clusterIP}')
-
-# Send high concurrency load to both pools simultaneously
-kubectl exec perf-client -- sh -c "\
-  perf_analyzer -m dlrm -u $L4_IP:8000 -i http --shape dense_x__0:13 --shape sparse_x__1:26 --concurrency-range 16:16 --measurement-interval 300000 > /dev/null 2>&1 & \
-  perf_analyzer -m dlrm -u $G4_IP:8000 -i http --shape dense_x__0:13 --shape sparse_x__1:26 --concurrency-range 16:16 --measurement-interval 300000 > /dev/null 2>&1 &"
+# Generate a continuous load that will push CPU/GPU utilization up
+kubectl exec perf-client -- sh -c "
+cat << 'EOF' > /tmp/load.sh
+for i in \$(seq 1 1000); do
+  curl -s -X POST http://$GATEWAY_IP:80/v2/models/dlrm/infer -H \"Content-Type: application/json\" -d '{\"inputs\":[{\"name\":\"dense_x__0\",\"shape\":[1,13],\"datatype\":\"FP32\",\"data\":[0,0,0,0,0,0,0,0,0,0,0,0,0]},{\"name\":\"sparse_x__1\",\"shape\":[1,26],\"datatype\":\"INT64\",\"data\":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}]}' > /dev/null &
+  sleep 0.2
+done
+wait
+EOF
+chmod +x /tmp/load.sh
+/tmp/load.sh &
+"
 ```
 
-### 3. Monitor HPA Reaction
-Watch the HPA react to the load spike. Notice how the GPU utilization (`duty_cycle`) quickly hits the 60% threshold, triggering GKE to provision new nodes.
+### Monitor the Results
+In a separate terminal, watch the HPAs. Because the Gateway uses UBB to evenly spread the traffic based on GPU duty cycle, you will see both the primary and secondary deployments' CPU metrics rise together and scale simultaneously.
 
 ```bash
 kubectl get hpa -w
 ```
-*Sample Output:*
-```text
-NAME            REFERENCE                       TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
-triton-g4-hpa   Deployment/triton-torchrec-g4   88%/60%       1         5         5          121m
-triton-l4-hpa   Deployment/triton-torchrec-l4   72%/60%       1         5         3          121m
-```
-
-### 4. Expected Test Results and Auto-Scaling Behavior
-
-During the load test, you should observe the following lifecycle:
-
-1.  **Scale Up (HPA Trigger):** As `perf_analyzer` saturates the Triton servers, the HPA will detect the spike in metrics and increase the desired replicas (e.g., from 1 to 5).
-2.  **Node Provisioning (NAP):** Because each pod strictly requests 1 GPU, GKE Node Auto-Provisioning (NAP) will attempt to create new physical nodes.
-    *   **Success (L4):** The `g2-standard-4` (L4) nodes will provision successfully, and new L4 pods will transition to `Running`.
-    *   **Stockout Handling (G4):** High-end GPUs like the RTX 6000 Ada (G4) often face physical capacity constraints in specific GCP zones. You may see the new G4 pods remain in a `Pending` state. If you inspect the system events (`kubectl get events -n kube-system`), you will see:
-        > `Failed adding 2 nodes... due to OutOfResource.RESOURCE_POOL_EXHAUSTED... (state:STOCKOUT, resource type:compute)`
-    *   **Why this is good:** Because we used strict `ComputeClasses` with `whenUnsatisfiable: DoNotScaleUp`, the system correctly queues the pods rather than silently falling back to inferior hardware, preserving the homogeneity required for the Gateway's routing logic.
-### 5. Final Scaling Test Results (Summary)
-
-On April 24, 2026, we performed a simultaneous high-concurrency scaling test for both L4 and G4 deployments on the GKE Standard cluster.
-
-- **L4 Scaling Results (Success):**
-    - The L4 deployment scaled from 1 to 3 replicas.
-    - GKE Node Auto-Provisioning (NAP) successfully provisioned two additional `g2-standard-4` (NVIDIA L4) nodes in `us-central1-b`.
-    - Total L4 capacity reached: 3 nodes.
-
-- **G4 Scaling Results (Stockout):**
-    - The G4 deployment attempted to scale from 1 to 3 replicas.
-    - The GKE cluster autoscaler requested two additional `g4-standard-48` (NVIDIA RTX 6000 Ada) nodes.
-    - **Result:** GCP returned `RESOURCE_POOL_EXHAUSTED` (STOCKOUT) in both `us-central1-b` and `us-central1-f`.
-    - **Verification:** System events correctly identified the stockout: `Failed adding 2 nodes... (state:STOCKOUT, resource type:compute)`.
-
-### 6. Architectural Conclusion
-
-This project successfully demonstrated that using **Strict ComputeClasses** on a GKE Standard cluster with **Node Auto-Provisioning** is the optimal way to manage heterogeneous GPU resources in a single region. 
-
-By isolating GPU types into separate deployments and using the **GKE Inference Gateway** to route traffic, we ensured:
-1.  **Homogeneity:** Each pool remained strictly L4 or G4, preserving the routing logic's accuracy.
-2.  **Safe Fallback:** The system prioritized scaling the L4 pool when G4 hardware was physically unavailable, rather than compromising performance by mixing hardware types.
-3.  **Efficiency:** HPA and NAP worked in tandem to dynamically expand and contract the infrastructure footprint based on real-time model load.
-

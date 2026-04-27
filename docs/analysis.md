@@ -1,70 +1,51 @@
-# Detailed Analysis: Multi-GPU Architecture with GKE Inference Gateway
+# Detailed Analysis: Active-Active Multi-Pool Architecture with UBB
 
-This document outlines the pros, cons, and operational realities of the specific architecture implemented in this project: **Using the GKE Inference Gateway to unify multiple, independent GPU deployments (e.g., L4 and G4), each governed by its own strict `ComputeClass` and independent Horizontal Pod Autoscaler (HPA).**
+This document outlines the pros, cons, and operational realities of implementing an **Active-Active** AI architecture on GKE using **Utilization-Based Balancing (UBB)** across multiple isolated nodepools.
 
 ## The Architecture at a Glance
-Instead of using a single deployment with a "fallback" ComputeClass (which mixes GPU types and breaks Inference Gateway latency predictions), we utilize a decoupled approach:
-1.  **Isolated Pools:** One deployment exclusively for L4 (`triton-torchrec-l4`), one exclusively for G4 (`triton-torchrec-g4`).
-2.  **Strict Provisioning:** `ComputeClasses` are locked with `whenUnsatisfiable: DoNotScaleUp`.
-3.  **Independent Scaling:** Each pool has its own HPA (scaling on Queue Depth / GPU utilization).
-4.  **Unified Entrypoint:** The GKE Inference Gateway routes traffic across both pools.
+To guarantee High Availability (HA) against physical GPU stockouts in a specific GCP zone, we utilize a decoupled approach managed by a unified Load Balancer:
+1.  **Isolated Pools:** We maintain two identical deployments (`triton-torchrec-l4-primary` and `triton-torchrec-l4-secondary`), each governed by its own strict `ComputeClass` with `whenUnsatisfiable: DoNotScaleUp`. This ensures nodes are perfectly homogenous within their pool.
+2.  **Unified Entrypoint:** A single Kubernetes `Service` selects all pods across both deployments using a shared label (`shared-app: triton-inference`).
+3.  **Active-Active UBB Routing:** We apply a `GCPBackendPolicy` to the unified service. The Regional Load Balancer natively reads the `gke.gpu_duty_cycle` metric and continuously spreads incoming traffic to maintain an even 80% utilization across all pods in all pools.
+4.  **Synchronized Scaling:** Because the load is spread uniformly, the independent HPAs for both deployments trigger scale-ups simultaneously when demand spikes.
 
 ---
 
-## Pros of the Decoupled Multi-GPU Architecture
+## "Spreading" (Active-Active) vs. "Spillover" (Waterfall)
 
-### 1. Safe Hardware Isolation
-By explicitly splitting L4 and G4 workloads, we solve the single-region capacity problem safely. If G4 instances stock out in `us-central1`, the G4 deployment simply stops scaling without polluting its pool with incorrect fallback hardware. This preserves the homogeneity required for accurate AI-aware load balancing *within* the pool.
+When using multiple `Deployments`, the Gateway's behavior depends entirely on how you configure the `GCPBackendPolicy`.
 
-### 2. A/B Testing vs. Dynamic Spillover Routing
-When using multiple `InferencePools`, the Gateway's behavior depends entirely on how you configure the `HTTPRoute`:
-*   **Static Weighted Routing (Our Setup):** By explicitly setting `weight: 50` for L4 and `weight: 50` for G4, the Gateway performs strict partitioning. **Warning:** If G4 capacity stocks out and queues rise, the Gateway will *not* dynamically shift traffic to L4. It will blindly continue sending 50% of traffic to the overwhelmed G4 pool. This is excellent for A/B testing or partitioned billing, but poor for handling stockouts.
-*   **Dynamic Overflow / Least-Request Routing:** To achieve true "spillover" (where the Gateway detects G4 is full and automatically routes to L4), you must avoid static weights. This requires advanced Gateway API configurations (such as global `least_request` load balancing policies or `InferenceObjectives` that define primary/fallback SLAs) so the Gateway evaluates queue depth *across* all pools globally, rather than just within a specific pool.
+### 1. The Active-Active Strategy (Current Implementation)
+By using a single **Unified Service** and setting a `maxUtilizationPercent` (e.g., 80%), the Load Balancer aggressively spreads traffic to ensure no single pod exceeds that threshold.
+*   **Pros:** 
+    *   **Maximum HA:** If one GCP zone completely runs out of L4 GPUs, the other deployment simply continues handling the spread load without requiring DNS updates or manual intervention.
+    *   **Predictable Scaling:** HPAs scale gracefully and synchronously.
+*   **Cons:**
+    *   **Cost:** You must maintain a `minReplicas: 1` for every deployment 24/7.
+    *   **Diluted Batching:** Distributing traffic widely means Triton receives fewer concurrent requests per pod, slightly reducing its ability to perform massive Dynamic Batching matrix optimizations.
 
-### 3. Graceful Degradation during Hardware Stockouts
-During our testing, we explicitly encountered `RESOURCE_POOL_EXHAUSTED` (Stockout) for the G4 (`nvidia-rtx-pro-6000`) hardware. Because the HPAs are independent, the L4 HPA successfully provisioned new nodes and handled the load, while the G4 HPA safely queued pending pods without crashing the primary service. 
-
-### 4. A/B Testing & Heterogeneous Pricing
-This architecture allows you to apply different `InferenceObjective` priorities or `HTTPRoute` weights. You can route "Premium" users to the high-bandwidth G4 pool, and "Free" tier users to the cost-effective L4 pool, scaling their respective HPAs entirely independently based on distinct user demands.
-
----
-
-## Cons & Operational Challenges of this Setup
-
-### 1. The "Oscillation" Risk between Gateway and HPA
-Because routing (Gateway) and scaling (HPA) are decoupled, they can sometimes fight each other if not tuned perfectly. 
-*   **Example:** A massive traffic spike hits. The Gateway sends traffic to the G4 pool. The G4 HPA triggers a scale-up, but hits a GCP stockout. The Gateway sees G4 queues rising and shifts traffic to the L4 pool. The L4 HPA now triggers a scale-up. If the G4 capacity suddenly frees up, the G4 pods spin up, the Gateway shifts traffic *back* to G4, leaving the newly provisioned L4 nodes idle. 
-*   **Mitigation:** Requires very careful tuning of HPA stabilization windows and Gateway routing weights.
-
-### 2. Baseline Cost Inefficiencies
-Because you are maintaining independent deployments to ensure high availability across hardware families, you must run at least `minReplicas: 1` for *every* GPU type in your architecture. You are paying for a baseline L4 and a baseline G4 24/7, rather than a single unified deployment that might only cost 1x L4 during low-traffic periods.
-
-### 3. Configuration Sprawl
-The number of Kubernetes manifests multiplies. For every new hardware family you want to support (e.g., adding an A100 pool), you must create a new:
-*   `ComputeClass`
-*   `Deployment`
-*   `Service`
-*   `InferencePool`
-*   `HorizontalPodAutoscaler`
-*   `PodMonitoring` (for custom metrics)
-
-### 5. Health Check Failures (503 Errors)
-When using GKE Gateways with inference servers like Triton, the default Gateway health check pings the root path (`/`). Because Triton returns a `404 Not Found` on `/`, the Load Balancer will mark the backends as broken, resulting in continuous `503 Service Unavailable` errors at the Gateway IP.
-*   **Mitigation:** You must deploy a `HealthCheckPolicy` CRD (as shown in this repository) to explicitly instruct the Gateway to probe `/v2/health/ready`.
-
-### 6. The "Gold Standard": Utilization-Based Balancing (UBB)
-While the `InferencePool` and Endpoint Picker (EPP) approach is currently in Preview and subject to controller bugs, the most robust way to achieve Dynamic Spillover in a single region is using **Utilization-Based Balancing (UBB)**.
-*   **The Mechanism:** Instead of a local EPP pod, UBB uses the `AutoscalingMetric` CRD to configure pods to send Open Request Cost Aggregation (ORCA) load reports directly to the Google Cloud Load Balancer.
-*   **The Policy:** You apply a `GCPBackendPolicy` to your standard Kubernetes Services, setting the `balancingMode` to `CUSTOM_METRICS`.
-*   **The Result:** The Regional Load Balancer natively reads the `queue_depth` metric from the Triton pods. If the G4 pods hit capacity, the Load Balancer natively and instantly sheds the overflow traffic to the L4 service, entirely bypassing the need for the experimental `InferencePool` CRDs.
-
-### 7. Fleet Membership and API Groups
-During implementation, we identified a strict boundary between API groups:
-*   **`inference.networking.x-k8s.io`**: Used for local pool management within a single cluster (via the Helm chart).
-*   **`networking.gke.io`**: Used for multi-cluster extensions (like `GCPInferencePoolImport`). 
-The error `group networking.gke.io is not supported` occurs if these multi-cluster resources are used in a cluster that is not registered as a **Config Cluster** within a Google Cloud Fleet. For production-grade AI-aware routing across multiple clusters, registering to a Fleet and enabling Multi-cluster Gateway features is the recommended (Preview) path.
+### 2. The Spillover Strategy (Alternative)
+If you prefer cost-efficiency over immediate HA, you would use **Two Separate Services** and attach a capacity policy only to the primary service. The Load Balancer would send 100% of traffic to the primary pool until its GPUs were saturated, and only *then* "spill over" to the secondary pool.
+*   **Pros:** 
+    *   **Cost Efficiency (Scale-to-Zero):** The secondary pool can sit at 0 replicas until the primary is genuinely full or suffering a stockout.
+    *   **Maximized Batching:** Funneling all traffic into the primary pool maximizes Triton's queue depth, enabling the largest, most efficient CUDA batching.
+*   **Cons:**
+    *   **Spike Vulnerability:** If a sudden traffic spike hits, the secondary pool will take minutes to scale from 0 to 1, causing the primary pool to suffer `504 Gateway Timeouts` while the secondary hardware provisions.
 
 ---
 
-## Conclusion
-For production RecML environments restricted to a single region, decoupling GPU families into isolated `InferencePools` (deployed via the official Helm chart) with independent HPAs is the safest, most performant way to utilize the GKE Inference Gateway. This enables the Gateway's Endpoint Picker to dynamically shift overflow traffic based on queue depth, while strict `ComputeClasses` protect against physical GCP hardware stockouts.
+## Operational Challenges & Solutions
+
+### 1. Triton Resource Starvation (504 Timeouts)
+During testing, we discovered that RecML payloads (JSON parsing, embedding lookups) are heavily CPU-bound before they even reach the GPU.
+*   **The Problem:** With only `500m` CPU limits, a burst of parallel requests caused the CPU to stall. The HTTP connection timed out (504 Gateway Timeout) before Triton could ship the tensors to the GPU.
+*   **The Solution:** We aligned the pod resources with the physical node (`g2-standard-4`), allocating `4 CPU` and `8Gi RAM` to Triton. We also updated the Triton `instance_group` configuration to spawn `count: 4` model instances, allowing it to process multiple threads concurrently. This completely resolved the timeouts.
+
+### 2. Health Check Failures
+When using GKE Gateways with inference servers like Triton, the default Gateway health check pings the root path (`/`). Because Triton returns a `404 Not Found` on `/`, the Load Balancer will mark the backends as broken.
+*   **The Solution:** You must deploy a `HealthCheckPolicy` CRD (as shown in this repository) to explicitly instruct the Gateway to probe `/v2/health/ready`.
+
+### 3. Metric Propagation Delay
+GKE's metric pipeline and the Google Cloud Load Balancer update routing tables on a roughly 60-second cycle. 
+*   **The Reality:** If you launch a sudden, massive burst of traffic from absolute zero, the Load Balancer will initially dump all traffic onto a single pod until the first metric report arrives. 
+*   **The Mitigation:** Setting `maxUtilizationPercent: 80` informs the Load Balancer of the target ceiling, allowing it to react more aggressively once metrics begin flowing, bringing the system back into perfect Active-Active balance within 2 minutes.
