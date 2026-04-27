@@ -1,4 +1,4 @@
-# GKE Inference Gateway: Active-Active Multi-Pool GPU Routing
+# GKE Gateway: Active-Active Multi-Pool GPU Routing
 
 This project demonstrates how to build a highly available, **Active-Active** AI inference architecture on Google Kubernetes Engine (GKE). It utilizes the GKE Gateway API and **Utilization-Based Balancing (UBB)** to seamlessly route traffic across multiple independent GPU nodepools, ensuring uniform hardware utilization and synchronized autoscaling.
 

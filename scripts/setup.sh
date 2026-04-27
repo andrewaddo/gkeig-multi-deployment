@@ -54,10 +54,10 @@ echo "===================================================="
 echo "5. Deploying Internal Gateway, HTTPRoute, HealthCheck, and UBB Policy"
 echo "===================================================="
 # Creates gke-l7-rilb Gateway, HealthCheck overrides, and UBB policy
-kubectl apply -f manifests/inference-gateway/triton-gateway-resource.yaml
-kubectl apply -f manifests/inference-gateway/triton-gateway.yaml
-kubectl apply -f manifests/inference-gateway/healthcheck-policy.yaml
-kubectl apply -f manifests/inference-gateway/ubb-policy.yaml
+kubectl apply -f manifests/gateway/triton-gateway-resource.yaml
+kubectl apply -f manifests/gateway/triton-gateway.yaml
+kubectl apply -f manifests/gateway/healthcheck-policy.yaml
+kubectl apply -f manifests/gateway/ubb-policy.yaml
 
 echo "===================================================="
 echo "6. Deploying Performance Client and HPA"
