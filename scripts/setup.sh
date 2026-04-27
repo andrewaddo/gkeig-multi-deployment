@@ -6,67 +6,58 @@ REGION="us-central1"
 CLUSTER_NAME="ducdo-gkeig-multideployment"
 
 echo "===================================================="
-echo "1. Creating GKE Standard Cluster with Node Auto-Provisioning (NAP)"
+echo "1. Checking/Creating GKE Standard Cluster with Node Auto-Provisioning (NAP)"
 echo "===================================================="
-gcloud container clusters create $CLUSTER_NAME \
-    --region $REGION \
-    --project $PROJECT_ID \
-    --gateway-api=standard \
-    --release-channel=regular \
-    --num-nodes=1 \
-    --machine-type=e2-standard-4 \
-    --cluster-ipv4-cidr=/20 \
-    --enable-autoprovisioning \
-    --min-cpu 1 --max-cpu 200 \
-    --min-memory 1 --max-memory 1000 \
-    --min-accelerator type=nvidia-l4,count=0 \
-    --max-accelerator type=nvidia-l4,count=8 \
-    --min-accelerator type=nvidia-rtx-pro-6000,count=0 \
-    --max-accelerator type=nvidia-rtx-pro-6000,count=8 \
-    --quiet
+
+if gcloud container clusters describe $CLUSTER_NAME --region $REGION --project $PROJECT_ID > /dev/null 2>&1; then
+    echo "Cluster $CLUSTER_NAME already exists. Skipping creation."
+else
+    echo "Creating cluster $CLUSTER_NAME..."
+    gcloud container clusters create $CLUSTER_NAME \
+        --region $REGION \
+        --project $PROJECT_ID \
+        --gateway-api=standard \
+        --release-channel=regular \
+        --num-nodes=1 \
+        --machine-type=e2-standard-4 \
+        --cluster-ipv4-cidr=/20 \
+        --enable-autoprovisioning \
+        --min-cpu 1 --max-cpu 200 \
+        --min-memory 1 --max-memory 1000 \
+        --min-accelerator type=nvidia-l4,count=0 \
+        --max-accelerator type=nvidia-l4,count=16 \
+        --quiet
+fi
 
 gcloud container clusters get-credentials $CLUSTER_NAME --region $REGION --project $PROJECT_ID
 
 echo "===================================================="
 echo "2. Applying Strict ComputeClasses"
 echo "===================================================="
-# Applies l4-class and g4-class with whenUnsatisfiable: DoNotScaleUp
+# Applies l4-class-primary and l4-class-secondary
 kubectl apply -f manifests/compute-classes/strict-classes.yaml
 
 echo "===================================================="
-echo "3. Deploying Triton Inference Servers (L4 and G4)"
+echo "3. Deploying Triton Inference Servers (L4 Primary and Secondary)"
 echo "===================================================="
 # Deploys Triton and uses an initContainer to generate a TorchScript DLRM model
-kubectl apply -f manifests/inference-pools/triton-l4.yaml
-kubectl apply -f manifests/inference-pools/triton-g4.yaml
+kubectl apply -f manifests/inference-pools/triton-l4-primary.yaml
+kubectl apply -f manifests/inference-pools/triton-l4-secondary.yaml
 
 echo "===================================================="
-echo "4. Deploying InferencePools via Helm (EPP Controller)"
+echo "4. Deploying Unified Service"
 echo "===================================================="
-# Installs the official gateway-api-inference-extension chart for both pools
-helm install triton-l4-pool \
-  --dependency-update \
-  --set inferencePool.modelServers.matchLabels.app=triton-l4 \
-  --set provider.name=gke \
-  --set inferenceExtension.monitoring.prometheus.enabled=true \
-  --version v1.4.0 \
-  oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool
-
-helm install triton-g4-pool \
-  --dependency-update \
-  --set inferencePool.modelServers.matchLabels.app=triton-g4 \
-  --set provider.name=gke \
-  --set inferenceExtension.monitoring.prometheus.enabled=true \
-  --version v1.4.0 \
-  oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool
+# Creates a unified service targeting all triton pods across both deployments
+kubectl apply -f manifests/inference-pools/triton-services.yaml
 
 echo "===================================================="
-echo "5. Deploying Internal Gateway, HTTPRoute, and HealthCheck"
+echo "5. Deploying Internal Gateway, HTTPRoute, HealthCheck, and UBB Policy"
 echo "===================================================="
-# Creates gke-l7-rilb Gateway, HealthCheck overrides, and routes to InferencePools
-kubectl apply -f manifests/inference-gateway/healthcheck-policy.yaml
+# Creates gke-l7-rilb Gateway, HealthCheck overrides, and UBB policy
 kubectl apply -f manifests/inference-gateway/triton-gateway-resource.yaml
 kubectl apply -f manifests/inference-gateway/triton-gateway.yaml
+kubectl apply -f manifests/inference-gateway/healthcheck-policy.yaml
+kubectl apply -f manifests/inference-gateway/ubb-policy.yaml
 
 echo "===================================================="
 echo "6. Deploying Performance Client and HPA"

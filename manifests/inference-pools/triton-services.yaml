@@ -5,6 +5,10 @@ metadata:
 spec:
   ports:
   - port: 8000
+    name: http
     targetPort: 8000
+  - port: 8002
+    name: metrics
+    targetPort: 8002
   selector:
-    app.kubernetes.io/name: triton-inference
+    shared-app: triton-inference

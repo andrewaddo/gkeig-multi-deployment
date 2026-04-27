@@ -1,12 +1,12 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: triton-l4-hpa
+  name: triton-l4-primary-hpa
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: triton-torchrec-l4
+    name: triton-torchrec-l4-primary
   minReplicas: 1
   maxReplicas: 5
   metrics:
@@ -15,28 +15,17 @@ spec:
       name: cpu
       target:
         type: Utilization
-        averageUtilization: 20
-  behavior:
-    scaleUp:
-      stabilizationWindowSeconds: 0
-      policies:
-      - type: Percent
-        value: 100
-        periodSeconds: 15
-      - type: Pods
-        value: 4
-        periodSeconds: 15
-      selectPolicy: Max
+        averageUtilization: 70
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: triton-g4-hpa
+  name: triton-l4-secondary-hpa
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: triton-torchrec-g4
+    name: triton-torchrec-l4-secondary
   minReplicas: 1
   maxReplicas: 5
   metrics:
@@ -45,15 +34,4 @@ spec:
       name: cpu
       target:
         type: Utilization
-        averageUtilization: 20
-  behavior:
-    scaleUp:
-      stabilizationWindowSeconds: 0
-      policies:
-      - type: Percent
-        value: 100
-        periodSeconds: 15
-      - type: Pods
-        value: 4
-        periodSeconds: 15
-      selectPolicy: Max
+        averageUtilization: 70

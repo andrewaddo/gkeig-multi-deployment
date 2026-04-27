@@ -1,38 +1,16 @@
-apiVersion: autoscaling.gke.io/v1beta1
-kind: AutoscalingMetric
-metadata:
-  name: triton-unified-queue
-  namespace: default
-spec:
-  metrics:
-  - pod:
-      selector:
-        matchLabels:
-          app.kubernetes.io/name: triton-inference
-      containers:
-      - endpoint:
-          port: 8002
-          path: /metrics
-        metrics:
-        - gauge:
-            name: application-utilization
-            prometheusMetricName: nv_inference_pending_request_count
-            loadBalancing:
-              enabled: true
----
 apiVersion: networking.gke.io/v1
 kind: GCPBackendPolicy
 metadata:
-  name: triton-unified-policy
+  name: triton-ubb-policy
   namespace: default
 spec:
+  default:
+    balancingMode: CUSTOM_METRICS
+    customMetrics:
+    - name: gke.gpu_duty_cycle
+      maxUtilizationPercent: 80
+      dryRun: false
   targetRef:
     group: ""
     kind: Service
     name: triton-unified-svc
-  default:
-    balancingMode: CUSTOM_METRICS
-    customMetrics:
-    - name: orca.application_utilization
-      dryRun: false
-      maxUtilizationPercent: 10

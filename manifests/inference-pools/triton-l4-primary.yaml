@@ -1,21 +1,25 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: triton-torchrec-g4
+  name: triton-torchrec-l4-primary
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: triton-g4
+      app: triton-l4-primary
   template:
     metadata:
       labels:
-        app: triton-g4
-        app.kubernetes.io/name: triton-inference
+        app: triton-l4-primary
+        shared-app: triton-inference
     spec:
       nodeSelector:
-        cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+        cloud.google.com/compute-class: l4-class-primary
       tolerations:
+      - key: "cloud.google.com/compute-class"
+        operator: "Equal"
+        value: "l4-class-primary"
+        effect: "NoSchedule"
       - key: "nvidia.com/gpu"
         operator: "Exists"
         effect: "NoSchedule"
@@ -32,8 +36,11 @@ spec:
           class SimpleDLRM(nn.Module):
               def __init__(self):
                   super().__init__()
+                  # Dense features (13) to bottom MLP
                   self.bottom_mlp = nn.Sequential(nn.Linear(13, 512), nn.ReLU(), nn.Linear(512, 256), nn.ReLU())
+                  # Sparse features (26 categorical) to embeddings (size 10k x 64)
                   self.embeddings = nn.ModuleList([nn.Embedding(10000, 64) for _ in range(26)])
+                  # Top MLP taking concatenated embeddings and bottom MLP output
                   self.top_mlp = nn.Sequential(nn.Linear(256 + 26 * 64, 1024), nn.ReLU(), nn.Linear(1024, 1), nn.Sigmoid())
               def forward(self, dense_x, sparse_x):
                   bottom_out = self.bottom_mlp(dense_x)
@@ -43,11 +50,14 @@ spec:
                   x = torch.cat([bottom_out] + emb_outs, dim=1)
                   return self.top_mlp(x)
           model = SimpleDLRM()
+          # Trace the model with dummy inputs
           dense = torch.randn(2, 13)
           sparse = torch.randint(0, 10000, (2, 26))
           traced = torch.jit.trace(model, (dense, sparse))
+          # Save for Triton
           os.makedirs("/models/dlrm/1", exist_ok=True)
           traced.save("/models/dlrm/1/model.pt")
+          # Write Triton config
           config = """name: "dlrm"
           platform: "pytorch_libtorch"
           max_batch_size: 1024
@@ -70,7 +80,7 @@ spec:
               dims: [ 1 ]
             }
           ]
-          instance_group [ { count: 1, kind: KIND_GPU } ]
+          instance_group [ { count: 4, kind: KIND_GPU } ]
           """
           with open("/models/dlrm/config.pbtxt", "w") as f:
               f.write(config)
@@ -84,9 +94,11 @@ spec:
         args: ["--model-repository=/models", "--log-verbose=1", "--strict-model-config=false"]
         resources:
           requests:
-            cpu: "500m"
-            memory: "2Gi"
+            cpu: "4"
+            memory: "8Gi"
           limits:
+            cpu: "4"
+            memory: "8Gi"
             nvidia.com/gpu: 1
         ports:
         - containerPort: 8000
