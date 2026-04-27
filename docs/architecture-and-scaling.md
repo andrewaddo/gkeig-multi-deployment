@@ -26,21 +26,21 @@ When the Load Balancer is configured with UBB targeting a `maxUtilizationPercent
 graph TD
     User([User Request]) --> Gateway[GKE Regional Internal L7 Load Balancer]
     
-    subgraph Routing Layer
+    subgraph RoutingLayer ["Routing Layer"]
         Gateway --> Route[HTTPRoute <br/><i>Path: /</i>]
         Route --> Service[Unified Service <br/><i>triton-unified-svc</i>]
     end
 
-    subgraph Policy Layer
+    subgraph PolicyLayer ["Policy Layer"]
         Policy[GCPBackendPolicy <br/><i>CUSTOM_METRICS: gke.gpu_duty_cycle</i>] -.-> Service
     end
 
-    subgraph Isolated Deployments
+    subgraph IsolatedDeployments ["Isolated Deployments"]
         Service --> DeployPrimary[Deployment: Primary Pool <br/><i>ComputeClass: l4-class-primary</i>]
         Service --> DeploySecondary[Deployment: Secondary Pool <br/><i>ComputeClass: l4-class-secondary</i>]
     end
 
-    subgraph Physical Nodes (NVIDIA L4)
+    subgraph PhysicalNodes ["Physical Nodes (NVIDIA L4)"]
         DeployPrimary --> PodP1[Triton Pod]
         DeployPrimary --> PodP2[Triton Pod]
         DeploySecondary --> PodS1[Triton Pod]
