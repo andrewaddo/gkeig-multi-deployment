@@ -34,6 +34,25 @@ If you prefer cost-efficiency over immediate HA, you would use **Two Separate Se
 
 ---
 
+## ⚠️ CRITICAL LIMITATION: Zonal NEG Granularity
+A common misconception is that UBB routes traffic based on **individual pod utilization**. In reality, standard GKE Gateway UBB operates at the **Zonal Network Endpoint Group (NEG)** level.
+
+- **The Aggregate Average:** The Load Balancer reads the `gke.gpu_duty_cycle` from all pods in a zone and calculates a single **Zonal Average**.
+- **The Dilution Problem:** If you mix heterogeneous hardware (e.g., NVIDIA L4 and NVIDIA RTX 6000) in the same zone, a heavily loaded "slow" pod's utilization will be masked by an idle "fast" pod. The Load Balancer will continue sending traffic to the zone because the *average* appears healthy.
+- **Scaling Impact:** This prevents the HPA from scaling the two pools independently if they are co-located in the same zones behind a single unified service.
+
+### Recommendation: Zonal Isolation Strategy
+To support heterogeneous hardware (e.g., L4 and G4 GPUs) without migrating to the complex GKE Inference Gateway, you should implement **Zonal Isolation**:
+1.  **Pin Hardware to Zones:** Use `ComputeClass` zonal constraints to ensure `Pool-A (L4)` lives only in `Zone-A`, and `Pool-B (G4)` lives only in `Zone-B`.
+2.  **Clean Metric Buckets:** This ensures each Zonal NEG contains perfectly homogeneous hardware. The Load Balancer can then accurately compare the utilization of the "Slow" zone vs the "Fast" zone.
+3.  **Predictable Spillover:** When the L4s in Zone-A reach the `maxUtilizationPercent`, the Load Balancer will naturally spill over traffic to the G4s in Zone-B.
+
+#### References
+*   [GKE Gateway API Concepts](https://cloud.google.com/kubernetes-engine/docs/concepts/gateway-api) - Official documentation on routing and capacity management in GKE.
+*   [GKE Network Endpoint Groups (NEGs)](https://cloud.google.com/kubernetes-engine/docs/how-to/standalone-neg) - Explains how Kubernetes Services are translated into Zonal NEGs, which is the root cause of the metric dilution issue.
+
+---
+
 ## Operational Challenges & Solutions
 
 ### 1. Triton Resource Starvation (504 Timeouts)

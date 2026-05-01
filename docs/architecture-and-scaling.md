@@ -10,15 +10,24 @@ When managing AI inference workloads, ensuring high availability (HA) against ph
 3.  **Unified Service:** Both deployments share a common label (`shared-app: triton-inference`). A single Kubernetes `Service` selects this label, combining all pods across all pools into a massive unified backend.
 4.  **Intelligent Routing (UBB):** We apply a `GCPBackendPolicy` utilizing **Utilization-Based Balancing (UBB)** directly to this unified service. The Regional Load Balancer natively reads the `gke.gpu_duty_cycle` metric from every pod. It aggressively spreads incoming requests to the pods with the lowest utilization, enforcing an Active-Active distribution.
 
-## 2. Dynamic Spreading Logic (UBB)
+## 2. Dynamic Spreading Logic (Zonal NEG Aggregation)
 
-A key advantage of using Utilization-Based Balancing (UBB) is its ability to perform **Dynamic Spreading** across different hardware pools based on real-time metrics, rather than static round-robin percentages.
+Contrary to earlier assumptions, Utilization-Based Balancing (UBB) performs **Zonal-level Spreading**, not per-pod spreading.
 
-### How Active-Active Spreading Works
-When the Load Balancer is configured with UBB targeting a `maxUtilizationPercent` of 80%:
-1.  **Continuous Metric Scoping:** The Load Balancer natively monitors the `gke.gpu_duty_cycle` of every individual pod within the unified service.
-2.  **Dynamic Scoring:** When a new request arrives, the Load Balancer routes it to the pod currently reporting the lowest GPU utilization.
-3.  **Automatic Balancing:** By constantly seeking the lowest utilization, the Load Balancer naturally forces all pods across all isolated deployments into a state of equilibrium. As overall traffic increases, the utilization of the entire global fleet rises uniformly, triggering all HPAs to scale up simultaneously.
+### How Zonal Aggregation Works
+1.  **Metric Aggregation:** GKE scrapes the `gke.gpu_duty_cycle` from every pod but aggregates them into a single metric per Zonal NEG (one per GCP zone).
+2.  **Load Balancer Decision:** When a request arrives, the Regional Load Balancer compares the **average utilization** of each zone.
+3.  **Zonal Overflow:** If `Zone-A` averages 81% and `maxUtilizationPercent` is 80%, the Load Balancer "overflows" new traffic to `Zone-B`. It **cannot** selectively pick an idle pod in `Zone-A` if other pods in that same zone are saturated.
+
+### Recommendation: Zonal Isolation Strategy
+If you intend to mix different GPU types (e.g., L4 and G4) in the same cluster:
+*   **Isolate by Zone:** Use `ComputeClass` `zones` constraints or `nodeSelector` to place each hardware type in a separate GCP zone.
+*   **Why it works:** By keeping fast and slow pods in different zones, you prevent "Metric Dilution." The Load Balancer can clearly see the performance difference between the Zonal NEGs and route traffic to the "Fast" zone when the "Slow" zone is saturated.
+*   **Trade-off:** You sacrifice zonal HA for each specific hardware type (i.e., if Zone-A fails, all L4s are lost). For multi-zonal HA with mixed hardware, the **GKE Inference Gateway** is the required architectural path.
+
+#### References for Zonal Limitations
+*   [GKE Gateway API Concepts](https://cloud.google.com/kubernetes-engine/docs/concepts/gateway-api)
+*   [GKE Network Endpoint Groups (NEGs)](https://cloud.google.com/kubernetes-engine/docs/how-to/standalone-neg) - Details the zonal nature of NEGs used by the Load Balancer.
 
 ## 3. Architecture Diagram
 
